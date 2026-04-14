@@ -1,0 +1,98 @@
+# Copyright © 2026 Michael Shields
+# SPDX-License-Identifier: MIT
+
+name: gitcalver
+description: Derive version numbers from git history using calendar versioning
+branding:
+  icon: tag
+  color: blue
+
+inputs:
+  prefix:
+    description: >-
+      Literal string prepended to version
+      (e.g., "0." for semver, "v0." for Go modules)
+    required: false
+    default: ''
+  dirty:
+    description: >-
+      Enable dirty versions with this suffix string
+      (e.g., "-dirty", "+dirty", "-SNAPSHOT").
+      Empty (default) refuses dirty workspaces.
+    required: false
+    default: ''
+  dirty-hash:
+    description: Append .HASH suffix on dirty versions
+    required: false
+    default: 'true'
+  branch:
+    description: Override default branch detection
+    required: false
+    default: ''
+
+outputs:
+  version:
+    description: The computed version string
+    value: ${{ steps.compute.outputs.version }}
+  date:
+    description: The YYYYMMDD date component
+    value: ${{ steps.compute.outputs.date }}
+  count:
+    description: The N count component
+    value: ${{ steps.compute.outputs.count }}
+  dirty:
+    description: Whether the workspace was dirty (true/false)
+    value: ${{ steps.compute.outputs.dirty }}
+  hash:
+    description: Short SHA of HEAD
+    value: ${{ steps.compute.outputs.hash }}
+
+runs:
+  using: composite
+  steps:
+    - id: compute
+      shell: bash
+      env:
+        INPUT_PREFIX: ${{ inputs.prefix }}
+        INPUT_DIRTY: ${{ inputs.dirty }}
+        INPUT_DIRTY_HASH: ${{ inputs.dirty-hash }}
+        INPUT_BRANCH: ${{ inputs.branch }}
+      run: |
+        args=()
+        if [[ -n "$INPUT_PREFIX" ]]; then
+          args+=(--prefix "$INPUT_PREFIX")
+        fi
+        if [[ -n "$INPUT_DIRTY" ]]; then
+          args+=(--dirty "$INPUT_DIRTY")
+        fi
+        if [[ "$INPUT_DIRTY_HASH" != "true" && -n "$INPUT_DIRTY" ]]; then
+          args+=(--no-dirty-hash)
+        fi
+        if [[ -n "$INPUT_BRANCH" ]]; then
+          args+=(--branch "$INPUT_BRANCH")
+        fi
+
+        version=$("${GITHUB_ACTION_PATH}/gitcalver.sh" "${args[@]}")
+
+        stripped=${version#"$INPUT_PREFIX"}
+        core=$(printf '%s' "$stripped" | grep -oE '^[0-9]{8}\.[0-9]+')
+        date=${core%%.*}
+        count=${core#*.}
+
+        clean="${INPUT_PREFIX}${core}"
+        if [[ "$version" != "$clean" ]]; then
+          dirty=true
+        else
+          dirty=false
+        fi
+
+        hash=$(git rev-parse --short HEAD)
+
+        delim="GITCALVER_$(openssl rand -hex 16)"
+        {
+          printf 'version<<%s\n%s\n%s\n' "${delim}" "${version}" "${delim}"
+          printf 'date<<%s\n%s\n%s\n' "${delim}" "${date}" "${delim}"
+          printf 'count<<%s\n%s\n%s\n' "${delim}" "${count}" "${delim}"
+          printf 'dirty<<%s\n%s\n%s\n' "${delim}" "${dirty}" "${delim}"
+          printf 'hash<<%s\n%s\n%s\n' "${delim}" "${hash}" "${delim}"
+        } >> "$GITHUB_OUTPUT"
