@@ -25,6 +25,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - run: make test-docker
 
+  # Uses branch override so tests pass on non-default branches.
   test-action:
     runs-on: ubuntu-24.04
     steps:
@@ -33,6 +34,8 @@ jobs:
           fetch-depth: 0
       - uses: ./
         id: version
+        with:
+          branch: ${{ github.head_ref || github.ref_name }}
       - run: |
           echo "version=${{ steps.version.outputs.version }}"
           echo "date=${{ steps.version.outputs.date }}"
@@ -48,10 +51,12 @@ jobs:
         id: semver
         with:
           prefix: '0.'
+          branch: ${{ github.head_ref || github.ref_name }}
       - uses: ./
         id: go
         with:
           prefix: 'v0.'
+          branch: ${{ github.head_ref || github.ref_name }}
       - run: |
           echo "${{ steps.semver.outputs.version }}" | grep -qE '^0\.[0-9]{8}\.[0-9]+$'
           echo "${{ steps.go.outputs.version }}" | grep -qE '^v0\.[0-9]{8}\.[0-9]+$'
@@ -60,6 +65,7 @@ jobs:
         id: dirty
         with:
           dirty: '-dirty'
+          branch: ${{ github.head_ref || github.ref_name }}
       - run: |
           [[ "${{ steps.dirty.outputs.dirty }}" == "true" ]]
           echo "${{ steps.dirty.outputs.version }}" | grep -qE '^[0-9]{8}\.[0-9]+-dirty\.[0-9a-f]+$'
@@ -68,5 +74,6 @@ jobs:
         with:
           dirty: '-dirty'
           dirty-hash: 'false'
+          branch: ${{ github.head_ref || github.ref_name }}
       - run: |
           echo "${{ steps.nohash.outputs.version }}" | grep -qE '^[0-9]{8}\.[0-9]+-dirty$'
