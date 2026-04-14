@@ -24,3 +24,49 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - run: make test-docker
+
+  test-action:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - uses: ./
+        id: version
+      - run: |
+          echo "version=${{ steps.version.outputs.version }}"
+          echo "date=${{ steps.version.outputs.date }}"
+          echo "count=${{ steps.version.outputs.count }}"
+          echo "dirty=${{ steps.version.outputs.dirty }}"
+          echo "hash=${{ steps.version.outputs.hash }}"
+          echo "${{ steps.version.outputs.version }}" | grep -qE '^[0-9]{8}\.[0-9]+$'
+          echo "${{ steps.version.outputs.date }}" | grep -qE '^[0-9]{8}$'
+          echo "${{ steps.version.outputs.count }}" | grep -qE '^[0-9]+$'
+          [[ "${{ steps.version.outputs.dirty }}" == "false" ]]
+          echo "${{ steps.version.outputs.hash }}" | grep -qE '^[0-9a-f]+$'
+      - uses: ./
+        id: semver
+        with:
+          prefix: '0.'
+      - uses: ./
+        id: go
+        with:
+          prefix: 'v0.'
+      - run: |
+          echo "${{ steps.semver.outputs.version }}" | grep -qE '^0\.[0-9]{8}\.[0-9]+$'
+          echo "${{ steps.go.outputs.version }}" | grep -qE '^v0\.[0-9]{8}\.[0-9]+$'
+      - run: echo dirty > untracked.txt
+      - uses: ./
+        id: dirty
+        with:
+          dirty: '-dirty'
+      - run: |
+          [[ "${{ steps.dirty.outputs.dirty }}" == "true" ]]
+          echo "${{ steps.dirty.outputs.version }}" | grep -qE '^[0-9]{8}\.[0-9]+-dirty\.[0-9a-f]+$'
+      - uses: ./
+        id: nohash
+        with:
+          dirty: '-dirty'
+          dirty-hash: 'false'
+      - run: |
+          echo "${{ steps.nohash.outputs.version }}" | grep -qE '^[0-9]{8}\.[0-9]+-dirty$'
