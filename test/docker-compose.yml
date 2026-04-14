@@ -1,0 +1,94 @@
+# Copyright © 2026 Michael Shields
+# SPDX-License-Identifier: MIT
+
+services:
+
+  # --- Debian (snapshot.debian.org) ---
+
+  debian-12:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile
+      args:
+        BASE: debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d
+        SNAPSHOT: "20260406T000000Z"
+
+  debian-13:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile
+      args:
+        BASE: debian:trixie-slim@sha256:4ffb3a1511099754cddc70eb1b12e50ffdb67619aa0ab6c13fcd800a78ef7c7a
+        SNAPSHOT: "20260406T000000Z"
+
+  # --- Ubuntu (snapshot.ubuntu.com) ---
+
+  ubuntu-22.04:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile
+      args:
+        BASE: ubuntu:22.04@sha256:eb29ed27b0821dca09c2e28b39135e185fc1302036427d5f4d70a41ce8fd7659
+        SNAPSHOT: "20260401T030400Z"
+
+  ubuntu-25.10:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile
+      args:
+        BASE: ubuntu:25.10@sha256:4a9232cc47bf99defcc8860ef6222c99773330367fcecbf21ba2edb0b810a31e
+        SNAPSHOT: "20260401T030400Z"
+
+  # --- Alpine (package version pin) ---
+
+  alpine-3.21:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile
+      args:
+        BASE: alpine:3.21@sha256:c3f8e73fdb79deaebaa2037150150191b9dcbfba68b4a46d70103204c53f4709
+        SNAPSHOT: "2.47.3-r0"
+
+  alpine-3.23:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile
+      args:
+        BASE: alpine:3.23@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
+        SNAPSHOT: "2.52.0-r0"
+
+  # --- Fedora (package version pin) ---
+
+  fedora-42:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile
+      args:
+        BASE: fedora:42@sha256:eb167a7adffa1489a205c83a7b9324e4cb0fae5c54645f263e70ac13f661f0e8
+        SNAPSHOT: "2.53.0-1.fc42"
+
+  fedora-43:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile
+      args:
+        BASE: fedora:43@sha256:781b7642e8bf256e9cf75d2aa58d86f5cc695fd2df113517614e181a5eee9138
+        SNAPSHOT: "2.53.0-1.fc43"
+
+  # --- Amazon Linux (releasever / package version pin) ---
+
+  amazon-linux-2:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile
+      args:
+        BASE: amazonlinux:2@sha256:dc69cc77521b5f921c5610e200bec1ef8141709ba33bf5c427ab6e85a8674ecb
+        SNAPSHOT: "2.47.3-1.amzn2.0.1"
+
+  amazon-linux-2023:
+    build:
+      context: ..
+      dockerfile: test/Dockerfile
+      args:
+        BASE: amazonlinux:2023@sha256:c4543691c8ce4157cbfe7d10170106eccb9dedd61f022980f062788d00e8af51
+        SNAPSHOT: "2023.10.20260330"
