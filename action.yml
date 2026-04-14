@@ -29,6 +29,12 @@ inputs:
     description: Override default branch detection
     required: false
     default: ''
+  tag:
+    description: >-
+      Create and push a lightweight git tag with the computed version.
+      Requires the version to be clean (not dirty) and contents: write permission.
+    required: false
+    default: 'false'
 
 outputs:
   version:
@@ -96,3 +102,31 @@ runs:
           printf 'dirty<<%s\n%s\n%s\n' "${delim}" "${dirty}" "${delim}"
           printf 'hash<<%s\n%s\n%s\n' "${delim}" "${hash}" "${delim}"
         } >> "$GITHUB_OUTPUT"
+    - id: tag
+      if: inputs.tag == 'true'
+      shell: bash
+      env:
+        VERSION: ${{ steps.compute.outputs.version }}
+        DIRTY: ${{ steps.compute.outputs.dirty }}
+      run: |
+        if [[ "$DIRTY" == "true" ]]; then
+          echo "::error::gitcalver: refusing to tag dirty version: $VERSION"
+          exit 1
+        fi
+
+        existing=$(git rev-parse "refs/tags/$VERSION^{commit}" 2>/dev/null || true)
+        head_sha=$(git rev-parse HEAD)
+
+        if [[ -n "$existing" ]]; then
+          if [[ "$existing" == "$head_sha" ]]; then
+            echo "::notice::gitcalver: tag $VERSION already exists at HEAD"
+            exit 0
+          else
+            echo "::error::gitcalver: tag $VERSION already exists on a different commit ($existing)"
+            exit 1
+          fi
+        fi
+
+        git tag -- "$VERSION" HEAD
+        git push origin "refs/tags/$VERSION"
+        echo "::notice::gitcalver: created and pushed tag $VERSION"

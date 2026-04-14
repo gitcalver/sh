@@ -82,6 +82,39 @@ Dirty versions cannot be reversed.
 | `--short`           | Output short commit hash (reverse lookup mode) |
 | `--help`            | Show help                                      |
 
+## GitHub Actions
+
+```yaml
+- uses: gitcalver/sh@main
+  id: version
+  with:
+    prefix: 'v'
+```
+
+Outputs: `version`, `date`, `count`, `dirty`, `hash`.
+
+### Tagging
+
+Set `tag: true` to create and push a lightweight git tag:
+
+```yaml
+permissions:
+  contents: write
+
+steps:
+  - uses: actions/checkout@v6
+    with:
+      fetch-depth: 0
+  - uses: gitcalver/sh@main
+    with:
+      prefix: 'v'
+      tag: 'true'
+```
+
+The tag name is the full version string (including any prefix). Dirty versions
+are never tagged. If the tag already exists at HEAD (e.g. on a workflow re-run),
+the step succeeds without creating a duplicate.
+
 ### Exit codes
 
 | Code | Meaning                                |

@@ -77,3 +77,12 @@ jobs:
           branch: ${{ github.head_ref || github.ref_name }}
       - run: |
           echo "${{ steps.nohash.outputs.version }}" | grep -qE '^[0-9]{8}\.[0-9]+-dirty$'
+      - uses: ./
+        id: dirty-tag
+        continue-on-error: true
+        with:
+          dirty: '-dirty'
+          branch: ${{ github.head_ref || github.ref_name }}
+          tag: 'true'
+      - run: |
+          [[ "${{ steps.dirty-tag.outcome }}" == "failure" ]]
