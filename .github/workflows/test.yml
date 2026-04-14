@@ -1,0 +1,20 @@
+# Copyright © 2026 Michael Shields
+# SPDX-License-Identifier: MIT
+
+name: Test
+on: [push, pull_request]
+
+jobs:
+  test-script:
+    # Newest and oldest non-EOL version of each Unix OS with a GitHub Actions runner.
+    strategy:
+      matrix:
+        os:
+          - ubuntu-24.04
+          - ubuntu-22.04
+          - macos-26
+          - macos-14
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - run: ./test/test.sh
