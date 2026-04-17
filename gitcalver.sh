@@ -39,7 +39,7 @@ Use -- to separate options from a revision that starts with -.
 
 Options:
   --prefix PREFIX     Literal string prepended to version (default: empty);
-                      also used to strip prefix in reverse lookup
+                      required to strip prefix in reverse lookup
   --dirty STRING      Enable dirty versions; append STRING.HASH to base
                       (STRING must not be empty)
   --no-dirty          Refuse dirty versions (overrides --dirty)
@@ -244,6 +244,11 @@ if [ -n "$PREFIX" ] && [ -n "$LOOKUP" ]; then
 fi
 
 CORE=$(parse_gitcalver_version "$LOOKUP")
+
+if [ -n "$PREFIX" ] && [ -n "$CORE" ] && [ "$LOOKUP" = "$POSITIONAL" ]; then
+    die "version $POSITIONAL is missing required prefix \"$PREFIX\""
+fi
+
 if [ -n "$CORE" ]; then
     TARGET_DATE=${CORE%%.*}
     TARGET_N=${CORE#*.}

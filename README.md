@@ -66,7 +66,7 @@ $ ./gitcalver.sh --short --prefix "0." 0.20260411.3
 a1b2c3d
 ```
 
-If the version was generated with `--prefix`, pass the same `--prefix` for reverse lookup.
+When `--prefix` is set, the prefix is required on the input version for reverse lookup; bare versions without the prefix are rejected.
 
 Dirty versions cannot be reversed.
 

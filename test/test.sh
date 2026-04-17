@@ -537,6 +537,18 @@ HASH=$(git rev-parse HEAD)
 assert_output "find: accepts go format" "$HASH" \
     "$GITCALVER" --prefix "v0." v0.20260410.1
 
+new_repo "find_prefix_required"
+commit_at "2026-04-10T09:00:00Z"
+assert_exit "find: bare version rejected when --prefix is set" 1 \
+    "$GITCALVER" --prefix "v0." 20260410.1
+
+new_repo "find_prefix_forward_fallthrough"
+commit_at "2026-04-10T09:00:00Z" "c1"
+git tag v0.1.2-rc1
+assert_output "find: prefixed non-version falls through to forward mode" \
+    "v0.20260410.1" \
+    "$GITCALVER" --prefix "v0." v0.1.2-rc1
+
 new_repo "find_not_found"
 commit_at "2026-04-10T09:00:00Z"
 assert_exit "find: version not found" 1 \
