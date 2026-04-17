@@ -26,6 +26,8 @@
 
 set -eu
 
+VERSION=""
+
 usage() {
     cat <<'EOF'
 Usage: gitcalver [OPTIONS] [REVISION | VERSION]
@@ -46,6 +48,7 @@ Options:
   --no-dirty-hash     Suppress .HASH suffix (requires --dirty)
   --branch BRANCH     Base branch name (e.g. "main"); overrides auto-detection
   --short             Output short commit hash (version-to-commit mode)
+  --version           Show version information
   --help              Show this help
 
 Exit codes:
@@ -103,6 +106,14 @@ while [ $# -gt 0 ]; do
     --short)
         SHORT_HASH=true
         shift
+        ;;
+    --version)
+        if [ -n "$VERSION" ]; then
+            printf 'gitcalver %s\n' "$VERSION"
+        else
+            printf 'gitcalver (development)\n'
+        fi
+        exit 0
         ;;
     --help)
         usage

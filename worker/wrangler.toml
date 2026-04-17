@@ -1,0 +1,11 @@
+name = "sh-gitcalver-org"
+main = "src/index.js"
+compatibility_date = "2026-04-16"
+
+routes = [
+  { pattern = "sh.gitcalver.org/*", zone_name = "gitcalver.org" }
+]
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "sh-gitcalver-org"

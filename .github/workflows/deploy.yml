@@ -1,0 +1,41 @@
+# Copyright © 2026 Michael Shields
+# SPDX-License-Identifier: MIT
+
+name: Deploy
+on:
+  push:
+    branches: [main]
+
+concurrency: deploy
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+      - name: Compute version
+        id: version
+        run: |
+          version=$(./gitcalver.sh)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Create and push tag
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          if git rev-parse "refs/tags/$version" >/dev/null 2>&1; then
+            echo "Tag $version already exists, skipping"
+          else
+            git tag "$version"
+            git push origin "$version"
+          fi
+      - name: Deploy to sh.gitcalver.org
+        run: |
+          curl -fsS --retry 3 --retry-delay 5 --retry-all-errors \
+            -X POST "https://sh.gitcalver.org/update" \
+            -H "Authorization: Bearer ${{ secrets.DEPLOY_WEBHOOK_SECRET }}" \
+            -H "Content-Type: application/json" \
+            -d '{"version":"${{ steps.version.outputs.version }}"}'

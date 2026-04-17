@@ -15,7 +15,7 @@ The only dependency is git (v2.15.0+).
 Copy `gitcalver.sh` into your project or somewhere on your `PATH`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/gitcalver/sh/main/gitcalver.sh -o gitcalver.sh
+curl -fsSLO https://sh.gitcalver.org/gitcalver.sh
 chmod +x gitcalver.sh
 ```
 
@@ -80,6 +80,7 @@ Dirty versions cannot be reversed.
 | `--no-dirty-hash`   | Suppress .HASH suffix (requires `--dirty`)     |
 | `--branch BRANCH`   | Base branch name (e.g. `main`); overrides auto-detection. This is the branch versions are minted on, not the branch you are working on. |
 | `--short`           | Output short commit hash (reverse lookup mode) |
+| `--version`         | Show version information                       |
 | `--help`            | Show help                                      |
 
 ## GitHub Actions
