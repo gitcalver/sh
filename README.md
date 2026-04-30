@@ -15,7 +15,7 @@ The only dependency is git (v2.15.0+).
 Copy `gitcalver.sh` into your project or somewhere on your `PATH`:
 
 ```sh
-curl -fsSLO https://sh.gitcalver.org/gitcalver.sh
+curl -fsSLO https://github.com/gitcalver/sh/releases/latest/download/gitcalver.sh
 chmod +x gitcalver.sh
 ```
 

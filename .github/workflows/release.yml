@@ -1,0 +1,30 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Stamp VERSION and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="${tag#v}"
+          grep -q '^VERSION=""$' gitcalver.sh \
+            || { echo "VERSION placeholder not found" >&2; exit 1; }
+          sed -i 's|^VERSION=""$|VERSION="'"$version"'"|' gitcalver.sh
+          actual=$(./gitcalver.sh --version)
+          [ "$actual" = "gitcalver $version" ] \
+            || { echo "Stamp verification failed: $actual" >&2; exit 1; }
+          gh release create "$tag" gitcalver.sh \
+            --title "$version" \
+            --notes "gitcalver.sh $version" \
+            --latest
