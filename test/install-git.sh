@@ -72,12 +72,27 @@ elif command -v dnf >/dev/null && grep -qi "Amazon" /etc/system-release 2>/dev/n
     dnf --releasever="${SNAPSHOT}" install -y git
     dnf clean all
 
-# Fedora (pin package version)
-elif command -v dnf >/dev/null; then
-    dnf install -y "git-${SNAPSHOT}"
+# Fedora (kojipkgs.fedoraproject.org — the dnf repo only carries the
+# latest build, so install the RPM by URL from Koji, which preserves
+# every build forever. We install just git-core (which ships /usr/bin/git
+# and has no version-locked deps on other git subpackages) to avoid the
+# `git` meta-package's strict Requires on git-core-doc/perl-Git, which
+# the repo no longer has matching versions of. SNAPSHOT is
+# version-release, e.g. "2.53.0-1.fc42". --nogpgcheck because we trust
+# kojipkgs over HTTPS and old RPM signing keys may not match the
+# container's installed keys.)
+elif command -v dnf >/dev/null && grep -qi '^ID=fedora' /etc/os-release; then
+    VERSION="${SNAPSHOT%-*}"
+    RELEASE="${SNAPSHOT#*-}"
+    ARCH=$(uname -m)
+    KOJI="https://kojipkgs.fedoraproject.org/packages/git/${VERSION}/${RELEASE}"
+    dnf install -y --nogpgcheck --setopt=install_weak_deps=False \
+        "${KOJI}/${ARCH}/git-core-${SNAPSHOT}.${ARCH}.rpm"
     dnf clean all
 
-# Amazon Linux 2 (pin package version)
+# Amazon Linux 2 (pin package version; amzn2-core has no public archive
+# of historical snapshots, so this pin breaks when Amazon ships a new
+# git build.)
 elif command -v yum >/dev/null; then
     yum install -y "git-${SNAPSHOT}"
     yum clean all
