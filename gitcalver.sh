@@ -242,6 +242,13 @@ resolve_branch_tip() {
 # Match a bare YYYYMMDD.N version string.
 # Outputs the version on success, produces no output on failure.
 parse_gitcalver_version() {
+    # A version is a single line. Reject embedded newlines up front: grep -x
+    # matches any one line, so a multi-line argument could otherwise smuggle a
+    # valid version line past it.
+    case "$1" in
+    *'
+'*) return 0 ;;
+    esac
     printf '%s\n' "$1" | grep -xE '[0-9]{8}\.[1-9][0-9]*' || true
 }
 

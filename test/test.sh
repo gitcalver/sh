@@ -370,6 +370,12 @@ commit_at "2026-04-10T09:00:00Z"
 assert_exit "trailing garbage not treated as version" 1 \
     "$GITCALVER" "20260410.3rc1"
 
+new_repo "version_multiline_arg"
+commit_at "2026-04-10T09:00:00Z"
+# A multi-line argument must not be accepted as a version via one matching line.
+assert_exit "multi-line argument not treated as version" 1 \
+    "$GITCALVER" "$(printf 'garbage\n20260410.1')"
+
 # ---- First-parent / merge behavior ----
 
 new_repo "merge_no_inflate"
