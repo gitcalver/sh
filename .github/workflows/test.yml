@@ -36,17 +36,23 @@ jobs:
         id: version
         with:
           branch: ${{ github.head_ref || github.ref_name }}
-      - run: |
-          echo "version=${{ steps.version.outputs.version }}"
-          echo "date=${{ steps.version.outputs.date }}"
-          echo "count=${{ steps.version.outputs.count }}"
-          echo "dirty=${{ steps.version.outputs.dirty }}"
-          echo "hash=${{ steps.version.outputs.hash }}"
-          echo "${{ steps.version.outputs.version }}" | grep -qE '^[0-9]{8}\.[0-9]+$'
-          echo "${{ steps.version.outputs.date }}" | grep -qE '^[0-9]{8}$'
-          echo "${{ steps.version.outputs.count }}" | grep -qE '^[0-9]+$'
-          [[ "${{ steps.version.outputs.dirty }}" == "false" ]]
-          echo "${{ steps.version.outputs.hash }}" | grep -qE '^[0-9a-f]+$'
+      - env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DATE: ${{ steps.version.outputs.date }}
+          COUNT: ${{ steps.version.outputs.count }}
+          DIRTY: ${{ steps.version.outputs.dirty }}
+          HASH: ${{ steps.version.outputs.hash }}
+        run: |
+          echo "version=$VERSION"
+          echo "date=$DATE"
+          echo "count=$COUNT"
+          echo "dirty=$DIRTY"
+          echo "hash=$HASH"
+          echo "$VERSION" | grep -qE '^[0-9]{8}\.[0-9]+$'
+          echo "$DATE" | grep -qE '^[0-9]{8}$'
+          echo "$COUNT" | grep -qE '^[0-9]+$'
+          [[ "$DIRTY" == "false" ]]
+          echo "$HASH" | grep -qE '^[0-9a-f]+$'
       - uses: ./
         id: semver
         with:
@@ -57,26 +63,34 @@ jobs:
         with:
           prefix: 'v0.'
           branch: ${{ github.head_ref || github.ref_name }}
-      - run: |
-          echo "${{ steps.semver.outputs.version }}" | grep -qE '^0\.[0-9]{8}\.[0-9]+$'
-          echo "${{ steps.go.outputs.version }}" | grep -qE '^v0\.[0-9]{8}\.[0-9]+$'
+      - env:
+          SEMVER_VERSION: ${{ steps.semver.outputs.version }}
+          GO_VERSION: ${{ steps.go.outputs.version }}
+        run: |
+          echo "$SEMVER_VERSION" | grep -qE '^0\.[0-9]{8}\.[0-9]+$'
+          echo "$GO_VERSION" | grep -qE '^v0\.[0-9]{8}\.[0-9]+$'
       - run: echo dirty > untracked.txt
       - uses: ./
         id: dirty
         with:
           dirty: '-dirty'
           branch: ${{ github.head_ref || github.ref_name }}
-      - run: |
-          [[ "${{ steps.dirty.outputs.dirty }}" == "true" ]]
-          echo "${{ steps.dirty.outputs.version }}" | grep -qE '^[0-9]{8}\.[0-9]+-dirty\.[0-9a-f]+$'
+      - env:
+          DIRTY: ${{ steps.dirty.outputs.dirty }}
+          VERSION: ${{ steps.dirty.outputs.version }}
+        run: |
+          [[ "$DIRTY" == "true" ]]
+          echo "$VERSION" | grep -qE '^[0-9]{8}\.[0-9]+-dirty\.[0-9a-f]+$'
       - uses: ./
         id: nohash
         with:
           dirty: '-dirty'
           dirty-hash: 'false'
           branch: ${{ github.head_ref || github.ref_name }}
-      - run: |
-          echo "${{ steps.nohash.outputs.version }}" | grep -qE '^[0-9]{8}\.[0-9]+-dirty$'
+      - env:
+          VERSION: ${{ steps.nohash.outputs.version }}
+        run: |
+          echo "$VERSION" | grep -qE '^[0-9]{8}\.[0-9]+-dirty$'
       - uses: ./
         id: dirty-tag
         continue-on-error: true
@@ -84,5 +98,7 @@ jobs:
           dirty: '-dirty'
           branch: ${{ github.head_ref || github.ref_name }}
           tag: 'true'
-      - run: |
-          [[ "${{ steps.dirty-tag.outcome }}" == "failure" ]]
+      - env:
+          OUTCOME: ${{ steps.dirty-tag.outcome }}
+        run: |
+          [[ "$OUTCOME" == "failure" ]]
