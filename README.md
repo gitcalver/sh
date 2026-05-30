@@ -121,6 +121,6 @@ the step succeeds without creating a duplicate.
 | Code | Meaning                                |
 |------|----------------------------------------|
 | 0    | Success                                |
-| 1    | Error (not a git repo, no commits, non-monotonic dates) |
+| 1    | Error (not a git repo, no commits, decreasing dates)   |
 | 2    | Dirty workspace or off default branch (without `--dirty`) |
 | 3    | Cannot trace to default branch         |
