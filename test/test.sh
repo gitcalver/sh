@@ -415,8 +415,8 @@ V3=$("$GITCALVER" 2>/dev/null)
 commit_at "2026-04-11T09:00:00Z" "c4"
 V4=$("$GITCALVER" 2>/dev/null)
 
-# Numeric comparison: YYYYMMDD part is always 8 digits so date*10000+N gives
-# a single integer that increases iff the version increases.
+# Numeric comparison: concatenate the 8-digit YYYYMMDD with a zero-padded N to
+# form a single integer that increases iff the version increases.
 version_ord() {
     echo "$(echo "$1" | cut -d. -f1)$(printf '%04d' "$(echo "$1" | cut -d. -f2)")"
 }
@@ -497,6 +497,15 @@ git remote add origin "$TMPDIR_BASE/detect_origin_main_remote"
 git fetch origin --quiet
 git remote set-head origin --delete
 assert_output "detect origin/main (no origin/HEAD)" "20260410.1" \
+    "$GITCALVER"
+
+new_repo "detect_local_master"
+# Rename the current (still unborn) branch; naming the old "main" ref would
+# fail on older git since it does not exist until the first commit.
+git branch -m master
+commit_at "2026-04-10T09:00:00Z"
+# No remote and no "main"; falls back to local "master".
+assert_output "detect local master branch" "20260410.1" \
     "$GITCALVER"
 
 # ---- Reverse lookup (version → commit) ----
@@ -703,6 +712,11 @@ new_repo "arg_edge_cases"
 commit_at "2026-04-10T09:00:00Z"
 assert_exit "--help exits 0" 0 \
     "$GITCALVER" --help
+# Accept either the unstamped "(development)" build or a release-stamped
+# "gitcalver YYYYMMDD.N", so this also holds when run against a release artifact.
+assert_match "--version reports a build" \
+    '^gitcalver (\(development\)|[0-9]{8}\.[1-9][0-9]*)$' \
+    "$GITCALVER" --version
 assert_exit "--prefix without argument" 1 \
     "$GITCALVER" --prefix
 assert_exit "--dirty without argument" 1 \
