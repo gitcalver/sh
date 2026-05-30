@@ -166,7 +166,7 @@ fi
 detect_default_branch() {
     # 1. Explicit override
     if [ -n "$BRANCH_OVERRIDE" ]; then
-        echo "$BRANCH_OVERRIDE"
+        printf '%s\n' "$BRANCH_OVERRIDE"
         return
     fi
 
@@ -174,7 +174,7 @@ detect_default_branch() {
     local ref
     ref=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null) || true
     if [ -n "$ref" ]; then
-        echo "${ref##*/}"
+        printf '%s\n' "${ref##*/}"
         return
     fi
 
