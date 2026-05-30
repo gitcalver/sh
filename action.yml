@@ -71,6 +71,8 @@ runs:
         if [[ -n "$INPUT_DIRTY" ]]; then
           args+=(--dirty "$INPUT_DIRTY")
         fi
+        # --no-dirty-hash only applies with --dirty (gitcalver rejects it on
+        # its own), so gate it on a non-empty dirty string.
         if [[ "$INPUT_DIRTY_HASH" != "true" && -n "$INPUT_DIRTY" ]]; then
           args+=(--no-dirty-hash)
         fi
@@ -80,19 +82,41 @@ runs:
 
         version=$("${GITHUB_ACTION_PATH}/gitcalver.sh" "${args[@]}")
 
-        stripped=${version#"$INPUT_PREFIX"}
-        core=$(printf '%s' "$stripped" | grep -oE '^[0-9]{8}\.[0-9]+')
-        date=${core%%.*}
-        count=${core#*.}
+        hash=$(git rev-parse --short HEAD)
 
-        clean="${INPUT_PREFIX}${core}"
-        if [[ "$version" != "$clean" ]]; then
-          dirty=true
-        else
+        # Ask the script itself whether this build is dirty (a dirty workspace
+        # or an off-branch HEAD) instead of inferring it from the version text,
+        # where a digit-leading dirty string is indistinguishable from the
+        # count. --no-dirty makes the script exit nonzero exactly when the
+        # version would be dirty, reusing its own definition of "dirty".
+        probe=()
+        if [[ -n "$INPUT_PREFIX" ]]; then
+          probe+=(--prefix "$INPUT_PREFIX")
+        fi
+        if [[ -n "$INPUT_BRANCH" ]]; then
+          probe+=(--branch "$INPUT_BRANCH")
+        fi
+        if "${GITHUB_ACTION_PATH}/gitcalver.sh" --no-dirty "${probe[@]}" >/dev/null 2>&1; then
           dirty=false
+        else
+          dirty=true
         fi
 
-        hash=$(git rev-parse --short HEAD)
+        # Recover DATE.COUNT. A clean version is exactly DATE.COUNT; a dirty one
+        # appends the dirty string and, unless suppressed, ".HASH" (the final
+        # dot-segment). Reaching the dirty branch implies --dirty was set -- a
+        # dirty workspace without it would have failed the invocation above --
+        # so INPUT_DIRTY is non-empty here and a hash is present iff dirty-hash
+        # is on. Strip both to recover DATE.COUNT.
+        core=${version#"$INPUT_PREFIX"}
+        if [[ "$dirty" == "true" ]]; then
+          if [[ "$INPUT_DIRTY_HASH" == "true" ]]; then
+            core=${core%.*}
+          fi
+          core=${core%"$INPUT_DIRTY"}
+        fi
+        date=${core%%.*}
+        count=${core#*.}
 
         delim="GITCALVER_$(openssl rand -hex 16)"
         {
