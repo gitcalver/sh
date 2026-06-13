@@ -170,11 +170,13 @@ detect_default_branch() {
         return
     fi
 
-    # 2. Remote default (origin/HEAD)
+    # 2. Remote default (origin/HEAD). Strip only the remote-tracking prefix,
+    # not every path component: a branch name may itself contain slashes (e.g.
+    # "release/v1"), and "${ref##*/}" would mangle it down to the last segment.
     local ref
     ref=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null) || true
     if [ -n "$ref" ]; then
-        printf '%s\n' "${ref##*/}"
+        printf '%s\n' "${ref#refs/remotes/origin/}"
         return
     fi
 
@@ -223,10 +225,10 @@ commit_on_branch() {
     fi
 
     local rev_sha branch_sha
-    rev_sha=$(git rev-parse "$rev" 2>/dev/null) || return 1
+    rev_sha=$(git rev-parse --verify "$rev" 2>/dev/null) || return 1
 
-    branch_sha=$(git rev-parse "refs/remotes/origin/$branch" 2>/dev/null) ||
-        branch_sha=$(git rev-parse "refs/heads/$branch" 2>/dev/null) ||
+    branch_sha=$(git rev-parse --verify "refs/remotes/origin/$branch" 2>/dev/null) ||
+        branch_sha=$(git rev-parse --verify "refs/heads/$branch" 2>/dev/null) ||
         return 1
 
     git merge-base --is-ancestor "$rev_sha" "$branch_sha" 2>/dev/null
@@ -309,7 +311,12 @@ if $SHORT_HASH; then
 fi
 
 if [ -n "$POSITIONAL" ]; then
-    REV=$(git rev-parse "$POSITIONAL^{commit}" 2>/dev/null) ||
+    # --verify is required for safety: without it, git rev-parse echoes an
+    # unrecognized option-like argument (e.g. "-foo") back unchanged and exits
+    # 0, so the "validation" would pass and the attacker-controlled string would
+    # flow on into git merge-base/git log as an option. --verify forces a single
+    # resolved revision and rejects anything that is not one.
+    REV=$(git rev-parse --verify "$POSITIONAL^{commit}" 2>/dev/null) ||
         die "not a gitcalver version or git revision: $POSITIONAL"
 else
     REV=HEAD

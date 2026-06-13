@@ -514,6 +514,19 @@ commit_at "2026-04-10T09:00:00Z"
 assert_output "detect local master branch" "20260410.1" \
     "$GITCALVER"
 
+new_repo "detect_origin_head_slash"
+# A default branch name may itself contain slashes (e.g. "release/v1").
+# origin/HEAD must be stripped of only the "refs/remotes/origin/" prefix, not
+# reduced to its last path segment ("v1"), which would fail to resolve.
+git branch -m release/v1
+commit_at "2026-04-10T09:00:00Z"
+git clone --bare . "$TMPDIR_BASE/detect_origin_head_slash_remote" --quiet
+git remote add origin "$TMPDIR_BASE/detect_origin_head_slash_remote"
+git fetch origin --quiet
+git remote set-head origin release/v1
+assert_output "detect origin/HEAD slash-containing branch" "20260410.1" \
+    "$GITCALVER"
+
 # ---- Reverse lookup (version → commit) ----
 
 new_repo "find_basic"
@@ -650,6 +663,25 @@ new_repo "rev_invalid"
 commit_at "2026-04-10T09:00:00Z"
 assert_exit "revision: invalid ref" 1 \
     "$GITCALVER" "nonexistent_ref"
+
+# A revision that looks like a git option must be rejected outright, never
+# passed through to an inner git command. Without --verify, git rev-parse echoes
+# an unrecognized option-like argument back unchanged and exits 0, so the string
+# would flow into git merge-base/git log as an option (e.g. "git log
+# --output=FILE" writes a file). "--" routes the dash-leading token to the
+# positional slot so it actually reaches the revision validation.
+new_repo "rev_option_injection"
+commit_at "2026-04-10T09:00:00Z"
+assert_exit "revision: dash-leading ref rejected" 1 \
+    "$GITCALVER" -- -foo
+INJECT_FILE="$TMPDIR_BASE/rev_option_injection.pwned"
+assert_exit "revision: option-injection ref rejected" 1 \
+    "$GITCALVER" -- "--output=$INJECT_FILE"
+if [ -e "$INJECT_FILE" ]; then
+    fail "revision: option injection writes no file" "no file" "file created"
+else
+    pass "revision: option injection writes no file"
+fi
 
 # ---- Time zone handling ----
 
