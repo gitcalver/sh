@@ -163,53 +163,55 @@ fi
 
 # --- Determine and verify default branch ---
 
-detect_default_branch() {
+# These helpers run in ( ) subshells, not { } blocks, so scratch variables stay
+# function-local without the non-POSIX `local` keyword; each communicates only
+# through stdout and its exit status.
+detect_default_branch() (
     # 1. Explicit override
     if [ -n "$BRANCH_OVERRIDE" ]; then
         printf '%s\n' "$BRANCH_OVERRIDE"
-        return
+        exit 0
     fi
 
     # 2. Remote default (origin/HEAD). Strip only the remote-tracking prefix,
     # not every path component: a branch name may itself contain slashes (e.g.
     # "release/v1"), and "${ref##*/}" would mangle it down to the last segment.
-    local ref
     ref=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null) || true
     if [ -n "$ref" ]; then
         printf '%s\n' "${ref#refs/remotes/origin/}"
-        return
+        exit 0
     fi
 
     # 3. Check origin/main, then origin/master
     if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
         echo "main"
-        return
+        exit 0
     fi
     if git rev-parse --verify refs/remotes/origin/master >/dev/null 2>&1; then
         echo "master"
-        return
+        exit 0
     fi
 
     # 4. Check local main, then master
     if git rev-parse --verify refs/heads/main >/dev/null 2>&1; then
         echo "main"
-        return
+        exit 0
     fi
     if git rev-parse --verify refs/heads/master >/dev/null 2>&1; then
         echo "master"
-        return
+        exit 0
     fi
 
-    return 1
-}
+    exit 1
+)
 
 DEFAULT_BRANCH=$(detect_default_branch) ||
     die "cannot determine default branch"
 
 # Check if a commit is on the given branch (reachable from its tip).
-commit_on_branch() {
-    local rev="$1"
-    local branch="$2"
+commit_on_branch() (
+    rev="$1"
+    branch="$2"
 
     # Fast path: HEAD checked out on the branch. This is load-bearing,
     # not just an optimization. Without it, unpushed commits on main
@@ -217,29 +219,27 @@ commit_on_branch() {
     # --is-ancestor check would fail, and we'd fall into the off-branch
     # path and version the merge-base instead of HEAD.
     if [ "$rev" = "HEAD" ]; then
-        local current
         current=$(git symbolic-ref --short HEAD 2>/dev/null) || true
         if [ "$current" = "$branch" ]; then
-            return 0
+            exit 0
         fi
     fi
 
-    local rev_sha branch_sha
-    rev_sha=$(git rev-parse --verify "$rev" 2>/dev/null) || return 1
+    rev_sha=$(git rev-parse --verify "$rev" 2>/dev/null) || exit 1
 
     branch_sha=$(git rev-parse --verify "refs/remotes/origin/$branch" 2>/dev/null) ||
         branch_sha=$(git rev-parse --verify "refs/heads/$branch" 2>/dev/null) ||
-        return 1
+        exit 1
 
     git merge-base --is-ancestor "$rev_sha" "$branch_sha" 2>/dev/null
-}
+)
 
 # Resolve the tip commit of the given branch (remote first, then local).
-resolve_branch_tip() {
-    local branch="$1"
+resolve_branch_tip() (
+    branch="$1"
     git rev-parse --verify "refs/remotes/origin/$branch" 2>/dev/null ||
         git rev-parse --verify "refs/heads/$branch" 2>/dev/null
-}
+)
 
 # Match a bare YYYYMMDD.N version string.
 # Outputs the version on success, produces no output on failure.
