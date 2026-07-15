@@ -2,6 +2,11 @@
 # Copyright © 2026 Michael Shields
 # SPDX-License-Identifier: MIT
 
+# This harness uses `local` (non-POSIX, but supported by every shell it runs
+# under). Unlike gitcalver.sh it can't switch to ( ) subshell helpers, because
+# new_repo() must cd the caller's shell. Scope the SC3043 exemption to this file
+# so gitcalver.sh itself stays honestly SC3043-clean.
+# shellcheck disable=SC3043
 set -eu
 
 # Override this to test other implementations, such as the Go version.

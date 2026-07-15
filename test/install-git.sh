@@ -2,6 +2,10 @@
 # Copyright © 2026 Michael Shields
 # SPDX-License-Identifier: MIT
 
+# This script sources /etc/os-release, which exists at runtime inside the target
+# container but not at lint time. Scope the SC1091 exemption to this file rather
+# than repo-wide.
+# shellcheck disable=SC1091
 set -eu
 
 SNAPSHOT="${1:?Usage: install-git.sh SNAPSHOT}"
