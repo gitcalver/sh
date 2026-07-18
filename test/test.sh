@@ -397,6 +397,59 @@ GIT_COMMITTER_DATE="2026-04-10T13:00:00Z" \
 assert_output "merges don't inflate count" "20260410.2" \
     "$GITCALVER"
 
+new_repo "merged_side_branch_not_clean"
+commit_at "2026-04-10T09:00:00Z" "base"
+git checkout -b feature --quiet
+commit_at "2026-04-10T10:00:00Z" "feature"
+FEATURE_REV=$(git rev-parse HEAD)
+FEATURE_SHORT=$(git rev-parse --short HEAD)
+git checkout main --quiet
+commit_at "2026-04-10T11:00:00Z" "main"
+GIT_COMMITTER_DATE="2026-04-10T12:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-10T12:00:00Z" \
+    git merge feature --no-ff -m "merge feature" --quiet
+# The feature commit is reachable from main through the merge's second parent,
+# but it is not itself a member of main's first-parent chain.
+assert_exit "merged side-branch revision is not clean" 2 \
+    "$GITCALVER" "$FEATURE_REV"
+assert_output "merged side-branch revision anchors at branch divergence" \
+    "20260410.1-dirty.${FEATURE_SHORT}" \
+    "$GITCALVER" --dirty "-dirty" "$FEATURE_REV"
+assert_output "merge commit remains on first-parent chain" "20260410.3" \
+    "$GITCALVER"
+
+new_repo "diverged_branch_anchor"
+commit_at "2026-04-10T09:00:00Z" "base"
+git checkout -b feature --quiet
+commit_at "2026-04-12T09:00:00Z" "feature"
+FEATURE_REV=$(git rev-parse HEAD)
+FEATURE_SHORT=$(git rev-parse --short HEAD)
+git checkout main --quiet
+commit_at "2026-04-11T09:00:00Z" "main"
+assert_output "diverged branch anchors at common branch commit" \
+    "20260410.1-dirty.${FEATURE_SHORT}" \
+    "$GITCALVER" --dirty "-dirty" "$FEATURE_REV"
+
+new_repo "reachable_off_chain_anchor"
+commit_at "2026-04-10T09:00:00Z" "base"
+git checkout -b feature --quiet
+commit_at "2026-04-11T08:00:00Z" "feature"
+git checkout main --quiet
+commit_at "2026-04-11T09:00:00Z" "main-1"
+commit_at "2026-04-11T10:00:00Z" "main-2"
+git checkout feature --quiet
+GIT_COMMITTER_DATE="2026-04-11T11:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-11T11:00:00Z" \
+    git merge main --no-ff -m "merge main into feature" --quiet
+FEATURE_MERGE=$(git rev-parse HEAD)
+FEATURE_MERGE_SHORT=$(git rev-parse --short HEAD)
+git checkout main --quiet
+# The newest reachable main-chain commit is a second parent of the target.
+# Anchor selection follows reachability, not only the target's first parents.
+assert_output "off-chain target uses newest reachable branch anchor" \
+    "20260411.2-dirty.${FEATURE_MERGE_SHORT}" \
+    "$GITCALVER" --dirty "-dirty" "$FEATURE_MERGE"
+
 # ---- UTC midnight boundary ----
 
 new_repo "utc_midnight"
@@ -530,6 +583,27 @@ git remote add origin "$TMPDIR_BASE/detect_origin_head_slash_remote"
 git fetch origin --quiet
 git remote set-head origin release/v1
 assert_output "detect origin/HEAD slash-containing branch" "20260410.1" \
+    "$GITCALVER"
+
+new_repo "detect_named_remote"
+commit_at "2026-04-10T09:00:00Z"
+git update-ref refs/remotes/upstream/trunk HEAD
+git symbolic-ref refs/remotes/upstream/HEAD refs/remotes/upstream/trunk
+assert_output "detect selected remote HEAD" "20260410.1" \
+    "$GITCALVER" --remote upstream
+
+new_repo "unpushed_selected_branch"
+commit_at "2026-04-10T09:00:00Z" "published"
+git update-ref refs/remotes/origin/main HEAD
+git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+commit_at "2026-04-10T10:00:00Z" "unpushed"
+UNPUSHED_REV=$(git rev-parse HEAD)
+assert_output "explicit unpushed selected-branch revision is clean" \
+    "20260410.2" \
+    "$GITCALVER" "$UNPUSHED_REV"
+git checkout --detach --quiet
+assert_output "detached unpushed selected-branch revision is clean" \
+    "20260410.2" \
     "$GITCALVER"
 
 # ---- Reverse lookup (version → commit) ----
@@ -766,6 +840,10 @@ assert_exit "--dirty without argument" 1 \
     "$GITCALVER" --dirty
 assert_exit "--branch without argument" 1 \
     "$GITCALVER" --branch
+assert_exit "--remote without argument" 1 \
+    "$GITCALVER" --remote
+assert_exit "--remote empty string" 1 \
+    "$GITCALVER" --remote ""
 assert_exit "leading zero in N rejected" 1 \
     "$GITCALVER" 20260410.01
 assert_exit "multiple positional args rejected" 1 \

@@ -47,6 +47,7 @@ Options:
   --no-dirty          Refuse dirty versions (overrides --dirty)
   --no-dirty-hash     Suppress .HASH suffix (requires --dirty)
   --branch BRANCH     Base branch name (e.g. "main"); overrides auto-detection
+  --remote REMOTE     Remote used for cached branch detection (default: origin)
   --short             Output short commit hash (version-to-commit mode)
   --version           Show version information
   --help              Show this help
@@ -73,6 +74,7 @@ DIRTY_SET=false
 NO_DIRTY=false
 NO_DIRTY_HASH=false
 BRANCH_OVERRIDE=""
+REMOTE="origin"
 POSITIONAL=""
 SHORT_HASH=false
 
@@ -101,6 +103,12 @@ while [ $# -gt 0 ]; do
     --branch)
         [ $# -ge 2 ] || die "--branch requires an argument"
         BRANCH_OVERRIDE="$2"
+        shift 2
+        ;;
+    --remote)
+        [ $# -ge 2 ] || die "--remote requires an argument"
+        [ -n "$2" ] || die "--remote requires a non-empty argument"
+        REMOTE="$2"
         shift 2
         ;;
     --short)
@@ -173,21 +181,26 @@ detect_default_branch() (
         exit 0
     fi
 
-    # 2. Remote default (origin/HEAD). Strip only the remote-tracking prefix,
-    # not every path component: a branch name may itself contain slashes (e.g.
+    # 2. Cached remote default. Strip only the remote-tracking prefix, not every
+    # path component: a branch name may itself contain slashes (e.g.
     # "release/v1"), and "${ref##*/}" would mangle it down to the last segment.
-    ref=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null) || true
+    remote_prefix="refs/remotes/$REMOTE/"
+    ref=$(git symbolic-ref "refs/remotes/$REMOTE/HEAD" 2>/dev/null) || true
     if [ -n "$ref" ]; then
-        printf '%s\n' "${ref#refs/remotes/origin/}"
-        exit 0
+        case "$ref" in
+        "$remote_prefix"*)
+            printf '%s\n' "${ref#"$remote_prefix"}"
+            exit 0
+            ;;
+        esac
     fi
 
-    # 3. Check origin/main, then origin/master
-    if git rev-parse --verify refs/remotes/origin/main >/dev/null 2>&1; then
+    # 3. Check the selected remote's main, then master
+    if git rev-parse --verify "refs/remotes/$REMOTE/main" >/dev/null 2>&1; then
         echo "main"
         exit 0
     fi
-    if git rev-parse --verify refs/remotes/origin/master >/dev/null 2>&1; then
+    if git rev-parse --verify "refs/remotes/$REMOTE/master" >/dev/null 2>&1; then
         echo "master"
         exit 0
     fi
@@ -208,38 +221,41 @@ detect_default_branch() (
 DEFAULT_BRANCH=$(detect_default_branch) ||
     die "cannot determine default branch"
 
-# Check if a commit is on the given branch (reachable from its tip).
-commit_on_branch() (
-    rev="$1"
-    branch="$2"
-
-    # Fast path: HEAD checked out on the branch. This is load-bearing,
-    # not just an optimization. Without it, unpushed commits on main
-    # would resolve branch_sha to origin/main (behind HEAD), the
-    # --is-ancestor check would fail, and we'd fall into the off-branch
-    # path and version the merge-base instead of HEAD.
-    if [ "$rev" = "HEAD" ]; then
-        current=$(git symbolic-ref --short HEAD 2>/dev/null) || true
-        if [ "$current" = "$branch" ]; then
-            exit 0
-        fi
-    fi
-
-    rev_sha=$(git rev-parse --verify "$rev" 2>/dev/null) || exit 1
-
-    branch_sha=$(git rev-parse --verify "refs/remotes/origin/$branch" 2>/dev/null) ||
-        branch_sha=$(git rev-parse --verify "refs/heads/$branch" 2>/dev/null) ||
-        exit 1
-
-    git merge-base --is-ancestor "$rev_sha" "$branch_sha" 2>/dev/null
-)
-
-# Resolve the tip commit of the given branch (remote first, then local).
+# Resolve the tip commit of the selected branch. Prefer the local ref so
+# unpushed commits on that branch remain clean; otherwise use the selected
+# remote's cached tracking ref. This never contacts the remote.
 resolve_branch_tip() (
     branch="$1"
-    git rev-parse --verify "refs/remotes/origin/$branch" 2>/dev/null ||
-        git rev-parse --verify "refs/heads/$branch" 2>/dev/null
+    git rev-parse --verify "refs/heads/$branch" 2>/dev/null ||
+        git rev-parse --verify "refs/remotes/$REMOTE/$branch" 2>/dev/null
 )
+
+# A clean version belongs only to the selected tip's exact first-parent chain.
+commit_on_first_parent_chain() (
+    rev="$1"
+    branch_tip="$2"
+    git rev-list --first-parent "$branch_tip" 2>/dev/null | grep -Fqx "$rev"
+)
+
+# Find the newest selected-chain commit reachable from an off-chain target.
+# Reachability considers every parent of the target, so a feature branch that
+# has merged the selected branch anchors at that newer selected-branch commit.
+find_reachable_branch_anchor() (
+    rev="$1"
+    branch_tip="$2"
+    git rev-list --first-parent "$branch_tip" 2>/dev/null |
+        while IFS= read -r candidate; do
+            if git merge-base --is-ancestor "$candidate" "$rev" 2>/dev/null; then
+                printf '%s\n' "$candidate"
+                break
+            fi
+        done
+)
+
+# Cache the selected branch tip once so every calculation in this invocation
+# uses the same local view even if another process updates a ref concurrently.
+DEFAULT_BRANCH_TIP=$(resolve_branch_tip "$DEFAULT_BRANCH") ||
+    die "cannot resolve default branch: $DEFAULT_BRANCH"
 
 # Match a bare YYYYMMDD.N version string.
 # Outputs the version on success, produces no output on failure.
@@ -276,11 +292,8 @@ if [ -n "$CORE" ]; then
     [ "$TARGET_N" -gt 0 ] 2>/dev/null ||
         die "invalid count in version: $POSITIONAL"
 
-    BRANCH_TIP=$(resolve_branch_tip "$DEFAULT_BRANCH") ||
-        die "cannot resolve default branch: $DEFAULT_BRANCH"
-
     # Walk first-parent history to find the commit
-    FOUND=$(TZ=UTC git log "$BRANCH_TIP" --first-parent \
+    FOUND=$(TZ=UTC git log "$DEFAULT_BRANCH_TIP" --first-parent \
         --format='%H %cd' --date=format-local:'%Y%m%d' |
         awk -v td="$TARGET_DATE" -v tn="$TARGET_N" '
             $2 == td { hashes[++count] = $1; next }
@@ -319,23 +332,22 @@ if [ -n "$POSITIONAL" ]; then
     REV=$(git rev-parse --verify "$POSITIONAL^{commit}" 2>/dev/null) ||
         die "not a gitcalver version or git revision: $POSITIONAL"
 else
-    REV=HEAD
+    REV=$(git rev-parse --verify 'HEAD^{commit}' 2>/dev/null) ||
+        die "no commits in repository"
 fi
 
 OFF_BRANCH=false
-DIRTY_REV=HEAD
-if ! commit_on_branch "$REV" "$DEFAULT_BRANCH"; then
-    BRANCH_TIP=$(resolve_branch_tip "$DEFAULT_BRANCH") ||
-        die "cannot resolve default branch: $DEFAULT_BRANCH"
-    if [ -z "$POSITIONAL" ]; then
-        MERGE_BASE=$(git merge-base HEAD "$BRANCH_TIP" 2>/dev/null) ||
+DIRTY_REV="$REV"
+if ! commit_on_first_parent_chain "$REV" "$DEFAULT_BRANCH_TIP"; then
+    BRANCH_ANCHOR=$(find_reachable_branch_anchor "$REV" "$DEFAULT_BRANCH_TIP")
+    if [ -z "$BRANCH_ANCHOR" ]; then
+        if [ -z "$POSITIONAL" ]; then
             die "cannot trace HEAD to the default branch ($DEFAULT_BRANCH)" 3
-    else
-        DIRTY_REV="$REV"
-        MERGE_BASE=$(git merge-base "$REV" "$BRANCH_TIP" 2>/dev/null) ||
+        else
             die "cannot trace $POSITIONAL to the default branch ($DEFAULT_BRANCH)" 3
+        fi
     fi
-    REV="$MERGE_BASE"
+    REV="$BRANCH_ANCHOR"
     OFF_BRANCH=true
 fi
 

@@ -79,6 +79,7 @@ Dirty versions cannot be reversed.
 | `--no-dirty`        | Refuse dirty versions (overrides `--dirty`)    |
 | `--no-dirty-hash`   | Suppress .HASH suffix (requires `--dirty`)     |
 | `--branch BRANCH`   | Base branch name (e.g. `main`); overrides auto-detection. This is the branch versions are minted on, not the branch you are working on. |
+| `--remote REMOTE`   | Remote used for cached branch detection (default: `origin`); never fetches |
 | `--short`           | Output short commit hash (reverse lookup mode) |
 | `--version`         | Show version information                       |
 | `--help`            | Show help                                      |
