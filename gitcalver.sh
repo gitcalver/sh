@@ -230,26 +230,24 @@ resolve_branch_tip() (
         git rev-parse --verify "refs/remotes/$REMOTE/$branch" 2>/dev/null
 )
 
-# A clean version belongs only to the selected tip's exact first-parent chain.
-commit_on_first_parent_chain() (
-    rev="$1"
-    branch_tip="$2"
-    git rev-list --first-parent "$branch_tip" 2>/dev/null | grep -Fqx "$rev"
-)
-
 # Find the newest selected-chain commit reachable from an off-chain target.
 # Reachability considers every parent of the target, so a feature branch that
 # has merged the selected branch anchors at that newer selected-branch commit.
 find_reachable_branch_anchor() (
     rev="$1"
     branch_tip="$2"
-    git rev-list --first-parent "$branch_tip" 2>/dev/null |
-        while IFS= read -r candidate; do
-            if git merge-base --is-ancestor "$candidate" "$rev" 2>/dev/null; then
-                printf '%s\n' "$candidate"
-                break
-            fi
-        done
+
+    # Excluding rev removes its full ancestry from the selected first-parent
+    # walk. The oldest remaining commit is therefore the child of the newest
+    # reachable anchor. If nothing remains, the selected tip itself is
+    # reachable. A root with no first parent means the histories do not meet.
+    last_unreachable=$(git rev-list --first-parent "$branch_tip" "^$rev" \
+        2>/dev/null | tail -n 1)
+    if [ -z "$last_unreachable" ]; then
+        printf '%s\n' "$branch_tip"
+    else
+        git rev-parse --verify "${last_unreachable}^1" 2>/dev/null || true
+    fi
 )
 
 # Cache the selected branch tip once so every calculation in this invocation
@@ -338,15 +336,15 @@ fi
 
 OFF_BRANCH=false
 DIRTY_REV="$REV"
-if ! commit_on_first_parent_chain "$REV" "$DEFAULT_BRANCH_TIP"; then
-    BRANCH_ANCHOR=$(find_reachable_branch_anchor "$REV" "$DEFAULT_BRANCH_TIP")
-    if [ -z "$BRANCH_ANCHOR" ]; then
-        if [ -z "$POSITIONAL" ]; then
-            die "cannot trace HEAD to the default branch ($DEFAULT_BRANCH)" 3
-        else
-            die "cannot trace $POSITIONAL to the default branch ($DEFAULT_BRANCH)" 3
-        fi
+BRANCH_ANCHOR=$(find_reachable_branch_anchor "$REV" "$DEFAULT_BRANCH_TIP")
+if [ -z "$BRANCH_ANCHOR" ]; then
+    if [ -z "$POSITIONAL" ]; then
+        die "cannot trace HEAD to the default branch ($DEFAULT_BRANCH)" 3
+    else
+        die "cannot trace $POSITIONAL to the default branch ($DEFAULT_BRANCH)" 3
     fi
+fi
+if [ "$BRANCH_ANCHOR" != "$REV" ]; then
     REV="$BRANCH_ANCHOR"
     OFF_BRANCH=true
 fi
