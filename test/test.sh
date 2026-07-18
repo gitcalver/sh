@@ -195,25 +195,27 @@ assert_output "clean: gitignored file" "20260410.2" \
 new_repo "dirty_default"
 commit_at "2026-04-10T09:00:00Z"
 echo "new" >untracked.txt
-assert_match "dirty -dirty" "^20260410\.1-dirty\." \
+assert_match "dirty -dirty" "^20260410\.1-dirty\.[0-9a-f]{7}$" \
     "$GITCALVER" --dirty "-dirty"
 
 new_repo "dirty_with_prefix"
 commit_at "2026-04-10T09:00:00Z"
 echo "new" >untracked.txt
-assert_match "dirty with prefix 0." "^0\.20260410\.1-dirty\." \
+assert_match "dirty with prefix 0." \
+    "^0\.20260410\.1-dirty\.[0-9a-f]{7}$" \
     "$GITCALVER" --prefix "0." --dirty "-dirty"
 
 new_repo "dirty_plus"
 commit_at "2026-04-10T09:00:00Z"
 echo "new" >untracked.txt
-assert_match "dirty +dirty" "^20260410\.1\+dirty\." \
+assert_match "dirty +dirty" "^20260410\.1\+dirty\.[0-9a-f]{7}$" \
     "$GITCALVER" --dirty "+dirty"
 
 new_repo "dirty_go_prefix"
 commit_at "2026-04-10T09:00:00Z"
 echo "new" >untracked.txt
-assert_match "dirty with prefix v0." "^v0\.20260410\.1-dirty\." \
+assert_match "dirty with prefix v0." \
+    "^v0\.20260410\.1-dirty\.[0-9a-f]{7}$" \
     "$GITCALVER" --prefix "v0." --dirty "-dirty"
 
 new_repo "dirty_no_hash"
@@ -231,7 +233,8 @@ assert_output "dirty -SNAPSHOT no hash" "20260410.1-SNAPSHOT" \
 new_repo "dirty_pre"
 commit_at "2026-04-10T09:00:00Z"
 echo "new" >untracked.txt
-assert_match "dirty .pre.dirty" "^20260410\.1\.pre\.dirty\." \
+assert_match "dirty .pre.dirty" \
+    "^20260410\.1\.pre\.dirty\.[0-9a-f]{7}$" \
     "$GITCALVER" --dirty ".pre.dirty"
 
 new_repo "dirty_flag_clean_workspace"
@@ -289,7 +292,8 @@ new_repo "feature_branch_dirty"
 commit_at "2026-04-10T09:00:00Z" "main-c1"
 git checkout -b feature --quiet
 commit_at "2026-04-10T12:00:00Z" "feature-c1"
-assert_match "feature branch with --dirty" "^20260410\.1-dirty\." \
+assert_match "feature branch with --dirty" \
+    "^20260410\.1-dirty\.[0-9a-f]{7}$" \
     "$GITCALVER" --dirty "-dirty"
 
 new_repo "feature_branch_no_hash"
@@ -402,7 +406,7 @@ commit_at "2026-04-10T09:00:00Z" "base"
 git checkout -b feature --quiet
 commit_at "2026-04-10T10:00:00Z" "feature"
 FEATURE_REV=$(git rev-parse HEAD)
-FEATURE_SHORT=$(git rev-parse --short HEAD)
+FEATURE_SHORT=$(git rev-parse HEAD | cut -c1-7)
 git checkout main --quiet
 commit_at "2026-04-10T11:00:00Z" "main"
 GIT_COMMITTER_DATE="2026-04-10T12:00:00Z" \
@@ -423,7 +427,7 @@ commit_at "2026-04-10T09:00:00Z" "base"
 git checkout -b feature --quiet
 commit_at "2026-04-12T09:00:00Z" "feature"
 FEATURE_REV=$(git rev-parse HEAD)
-FEATURE_SHORT=$(git rev-parse --short HEAD)
+FEATURE_SHORT=$(git rev-parse HEAD | cut -c1-7)
 git checkout main --quiet
 commit_at "2026-04-11T09:00:00Z" "main"
 assert_output "diverged branch anchors at common branch commit" \
@@ -442,7 +446,7 @@ GIT_COMMITTER_DATE="2026-04-11T11:00:00Z" \
     GIT_AUTHOR_DATE="2026-04-11T11:00:00Z" \
     git merge main --no-ff -m "merge main into feature" --quiet
 FEATURE_MERGE=$(git rev-parse HEAD)
-FEATURE_MERGE_SHORT=$(git rev-parse --short HEAD)
+FEATURE_MERGE_SHORT=$(git rev-parse HEAD | cut -c1-7)
 git checkout main --quiet
 # The newest reachable main-chain commit is a second parent of the target.
 # Anchor selection follows reachability, not only the target's first parents.
@@ -628,7 +632,7 @@ assert_output "find: next day" "$HASH4" \
 
 new_repo "find_short"
 commit_at "2026-04-10T09:00:00Z"
-SHORT=$(git rev-parse --short HEAD)
+SHORT=$(git rev-parse HEAD | cut -c1-7)
 assert_output "find --short" "$SHORT" \
     "$GITCALVER" --short 20260410.1
 
@@ -732,7 +736,7 @@ commit_at "2026-04-10T09:00:00Z" "main-c1"
 git checkout -b feature --quiet
 commit_at "2026-04-10T12:00:00Z" "feature-c1"
 FEATURE_REV=$(git rev-parse HEAD)
-FEATURE_SHORT=$(git rev-parse --short HEAD)
+FEATURE_SHORT=$(git rev-parse HEAD | cut -c1-7)
 git checkout main --quiet
 assert_output "revision: off-branch with --dirty" \
     "20260410.1-dirty.${FEATURE_SHORT}" \
@@ -818,10 +822,99 @@ new_repo "dirty_hash_is_head"
 commit_at "2026-04-10T09:00:00Z" "main-c1"
 git checkout -b feature --quiet
 commit_at "2026-04-10T12:00:00Z" "feature-c1"
-EXPECTED_HASH=$(git rev-parse --short HEAD)
+EXPECTED_HASH=$(git rev-parse HEAD | cut -c1-7)
 assert_output "dirty hash is HEAD not merge-base" \
     "20260410.1-dirty.${EXPECTED_HASH}" \
     "$GITCALVER" --dirty "-dirty"
+
+# ---- Omitted versus explicit target ----
+
+new_repo "explicit_target_workspace"
+commit_at "2026-04-10T09:00:00Z"
+HEAD_HASH=$(git rev-parse HEAD)
+echo "new" >untracked.txt
+assert_exit "omitted target checks workspace" 2 \
+    "$GITCALVER"
+assert_exit "-- without target still checks workspace" 2 \
+    "$GITCALVER" --
+assert_output "explicit HEAD ignores workspace" "20260410.1" \
+    "$GITCALVER" HEAD
+assert_output "explicit object ID ignores workspace" "20260410.1" \
+    "$GITCALVER" "$HEAD_HASH"
+assert_exit "explicit empty target is not omission" 1 \
+    "$GITCALVER" ""
+assert_exit "explicit empty target occupies positional slot" 1 \
+    "$GITCALVER" "" HEAD
+
+# ---- Bare repositories ----
+
+new_repo "bare_source"
+commit_at "2026-04-10T09:00:00Z" "c1"
+FIRST_HASH=$(git rev-parse HEAD)
+commit_at "2026-04-10T12:00:00Z" "c2"
+HEAD_HASH=$(git rev-parse HEAD)
+git clone --bare . "$TMPDIR_BASE/bare_repo" --quiet
+cd "$TMPDIR_BASE/bare_repo"
+assert_output "bare repository implicit HEAD" "20260410.2" \
+    "$GITCALVER"
+assert_output "bare repository explicit revision" "20260410.1" \
+    "$GITCALVER" "$FIRST_HASH"
+assert_output "bare repository reverse full object ID" "$HEAD_HASH" \
+    "$GITCALVER" 20260410.2
+
+# ---- Exact version parsing precedence ----
+
+new_repo "version_ref_precedence"
+commit_at "2026-04-10T09:00:00Z" "version target"
+VERSION_HASH=$(git rev-parse HEAD)
+commit_at "2026-04-11T09:00:00Z" "ref target"
+git tag 20260410.1
+git tag v0.20260410.1
+assert_output "version wins over same-named ref" "$VERSION_HASH" \
+    "$GITCALVER" 20260410.1
+assert_output "prefixed version wins over same-named ref" "$VERSION_HASH" \
+    "$GITCALVER" --prefix v0. v0.20260410.1
+
+new_repo "version_calendar_validation"
+commit_at "2024-02-29T09:00:00Z"
+LEAP_HASH=$(git rev-parse HEAD)
+git tag 20230229.1
+assert_output "valid leap-day version" "$LEAP_HASH" \
+    "$GITCALVER" 20240229.1
+assert_exit "invalid non-leap date stays in reverse mode" 1 \
+    "$GITCALVER" 20230229.1
+assert_exit "invalid month rejected as version" 1 \
+    "$GITCALVER" 20241301.1
+assert_exit "invalid day rejected as version" 1 \
+    "$GITCALVER" 20240431.1
+
+# ---- Fixed object-ID output ----
+
+new_repo "fixed_object_id_output"
+commit_at "2026-04-10T09:00:00Z"
+FULL_HASH=$(git rev-parse HEAD)
+SHORT_HASH=$(printf '%.7s' "$FULL_HASH")
+git config core.abbrev 12
+assert_output "reverse output remains full object ID" "$FULL_HASH" \
+    "$GITCALVER" 20260410.1
+assert_output "reverse --short is exactly seven characters" "$SHORT_HASH" \
+    "$GITCALVER" --short 20260410.1
+echo "new" >untracked.txt
+assert_output "dirty hash is exactly seven characters" \
+    "20260410.1-dirty.${SHORT_HASH}" \
+    "$GITCALVER" --dirty "-dirty"
+
+# ---- Prefix validation ----
+
+new_repo "prefix_validation"
+commit_at "2026-04-10T09:00:00Z"
+PREFIX_HASH=$(git rev-parse HEAD)
+assert_output "single-line literal prefix" "release/20260410.1" \
+    "$GITCALVER" --prefix "release/"
+assert_output "single-line prefix reverses exactly" "$PREFIX_HASH" \
+    "$GITCALVER" --prefix "release/" release/20260410.1
+assert_exit "newline in prefix rejected" 1 \
+    "$GITCALVER" --prefix "$(printf 'release/\n0.')"
 
 # ---- Argument parsing edge cases ----
 

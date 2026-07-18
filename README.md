@@ -32,9 +32,14 @@ $ ./gitcalver.sh
 20260411.3
 ```
 
+When no target is supplied, gitcalver also checks the workspace for uncommitted
+changes. An explicit revision—including `HEAD`—describes only that commit and
+ignores workspace state. Bare repositories are supported.
+
 ### Version prefix
 
-Use `--prefix` to prepend a string to the version number, e.g.:
+Use `--prefix` to prepend a single-line literal string to the version number,
+e.g.:
 
 | Use case | Command                      | Example output     |
 |----------|------------------------------|--------------------|
@@ -47,7 +52,9 @@ Use `--prefix` to prepend a string to the version number, e.g.:
 By default, gitcalver exits with status 2 if the workspace has uncommitted
 changes. Use `--dirty STRING` to produce a version instead; the output will
 include the given string and a short commit hash
-(e.g. `--dirty "-dirty"` produces `20260411.3-dirty.abc1234`).
+(e.g. `--dirty "-dirty"` produces `20260411.3-dirty.abc1234`). The hash is
+always the first seven lowercase characters of the target object ID, regardless
+of Git abbreviation settings or other objects in the repository.
 
 Use `--no-dirty-hash` with `--dirty` to suppress the hash suffix.
 Use `--no-dirty` to explicitly refuse dirty versions (overrides `--dirty`).
@@ -66,7 +73,12 @@ $ ./gitcalver.sh --short --prefix "0." 0.20260411.3
 a1b2c3d
 ```
 
-When `--prefix` is set, the prefix is required on the input version for reverse lookup; bare versions without the prefix are rejected.
+Reverse lookup outputs the full object ID by default; `--short` outputs its
+first seven characters. An exact version-shaped input takes precedence over a
+same-named Git ref.
+
+When `--prefix` is set, the prefix is required on the input version for reverse
+lookup; bare versions without the prefix are rejected.
 
 Dirty versions cannot be reversed.
 
@@ -80,7 +92,7 @@ Dirty versions cannot be reversed.
 | `--no-dirty-hash`   | Suppress .HASH suffix (requires `--dirty`)     |
 | `--branch BRANCH`   | Base branch name (e.g. `main`); overrides auto-detection. This is the branch versions are minted on, not the branch you are working on. |
 | `--remote REMOTE`   | Remote used for cached branch detection (default: `origin`); never fetches |
-| `--short`           | Output short commit hash (reverse lookup mode) |
+| `--short`           | Output first seven object-ID characters in reverse mode |
 | `--version`         | Show version information                       |
 | `--help`            | Show help                                      |
 
@@ -119,9 +131,9 @@ the step succeeds without creating a duplicate.
 
 ### Exit codes
 
-| Code | Meaning                                |
-|------|----------------------------------------|
-| 0    | Success                                |
-| 1    | Error (not a git repo, no commits, decreasing dates)   |
-| 2    | Dirty workspace or off default branch (without `--dirty`) |
-| 3    | Cannot trace to default branch         |
+| Code | Meaning                                                           |
+|------|-------------------------------------------------------------------|
+| 0    | Success                                                           |
+| 1    | Invalid input, repository state, version date, or commit history   |
+| 2    | Dirty workspace or off-chain target refused without `--dirty`      |
+| 3    | Target cannot be traced to the selected branch                     |
