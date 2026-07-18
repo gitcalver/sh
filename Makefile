@@ -1,7 +1,7 @@
 # Copyright © 2026 Michael Shields
 # SPDX-License-Identifier: MIT
 
-SH_FILES := gitcalver.sh test/test.sh test/install-git.sh
+SH_FILES := gitcalver.sh action/publish.sh test/test.sh test/action.sh test/install-git.sh
 
 LINUX_SERVICES := debian-12 debian-13 \
 	ubuntu-22.04 ubuntu-25.10 \
@@ -17,6 +17,7 @@ test: test-local test-docker
 
 test-local:
 	./test/test.sh
+	./test/action.sh
 
 test-docker:
 	docker compose -f test/docker-compose.yml up --build --abort-on-container-failure $(LINUX_SERVICES)

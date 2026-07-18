@@ -29,6 +29,14 @@ inputs:
     description: Override default branch detection
     required: false
     default: ''
+  remote:
+    description: Remote used for cached branch detection and tag publication
+    required: false
+    default: origin
+  tag-prefix:
+    description: Literal string prepended to the version when naming the tag
+    required: false
+    default: ''
   tag:
     description: >-
       Create and push a lightweight git tag with the computed version.
@@ -52,6 +60,9 @@ outputs:
   hash:
     description: Short SHA of HEAD
     value: ${{ steps.compute.outputs.hash }}
+  tag:
+    description: Tag name formed from tag-prefix and version
+    value: ${{ steps.compute.outputs.tag }}
 
 runs:
   using: composite
@@ -63,6 +74,8 @@ runs:
         INPUT_DIRTY: ${{ inputs.dirty }}
         INPUT_DIRTY_HASH: ${{ inputs.dirty-hash }}
         INPUT_BRANCH: ${{ inputs.branch }}
+        INPUT_REMOTE: ${{ inputs.remote }}
+        INPUT_TAG_PREFIX: ${{ inputs.tag-prefix }}
       run: |
         args=()
         if [[ -n "$INPUT_PREFIX" ]]; then
@@ -79,10 +92,14 @@ runs:
         if [[ -n "$INPUT_BRANCH" ]]; then
           args+=(--branch "$INPUT_BRANCH")
         fi
+        if [[ -n "$INPUT_REMOTE" ]]; then
+          args+=(--remote "$INPUT_REMOTE")
+        fi
 
         version=$("${GITHUB_ACTION_PATH}/gitcalver.sh" "${args[@]}")
 
-        hash=$(git rev-parse --short HEAD)
+        hash=$(git rev-parse HEAD)
+        hash=${hash:0:7}
 
         # Ask the script itself whether this build is dirty (a dirty workspace
         # or an off-branch HEAD) instead of inferring it from the version text,
@@ -95,6 +112,9 @@ runs:
         fi
         if [[ -n "$INPUT_BRANCH" ]]; then
           probe+=(--branch "$INPUT_BRANCH")
+        fi
+        if [[ -n "$INPUT_REMOTE" ]]; then
+          probe+=(--remote "$INPUT_REMOTE")
         fi
         if "${GITHUB_ACTION_PATH}/gitcalver.sh" --no-dirty "${probe[@]}" >/dev/null 2>&1; then
           dirty=false
@@ -117,6 +137,7 @@ runs:
         fi
         date=${core%%.*}
         count=${core#*.}
+        tag="${INPUT_TAG_PREFIX}${version}"
 
         delim="GITCALVER_$(openssl rand -hex 16)"
         {
@@ -125,32 +146,18 @@ runs:
           printf 'count<<%s\n%s\n%s\n' "${delim}" "${count}" "${delim}"
           printf 'dirty<<%s\n%s\n%s\n' "${delim}" "${dirty}" "${delim}"
           printf 'hash<<%s\n%s\n%s\n' "${delim}" "${hash}" "${delim}"
+          printf 'tag<<%s\n%s\n%s\n' "${delim}" "${tag}" "${delim}"
         } >> "$GITHUB_OUTPUT"
     - id: tag
       if: inputs.tag == 'true'
       shell: bash
       env:
         VERSION: ${{ steps.compute.outputs.version }}
+        VERSION_DATE: ${{ steps.compute.outputs.date }}
         DIRTY: ${{ steps.compute.outputs.dirty }}
+        VERSION_PREFIX: ${{ inputs.prefix }}
+        TAG_PREFIX: ${{ inputs.tag-prefix }}
+        REMOTE: ${{ inputs.remote }}
+        BRANCH_OVERRIDE: ${{ inputs.branch }}
       run: |
-        if [[ "$DIRTY" == "true" ]]; then
-          echo "::error::gitcalver: refusing to tag dirty version: $VERSION"
-          exit 1
-        fi
-
-        existing=$(git rev-parse --verify "refs/tags/$VERSION^{commit}" 2>/dev/null || true)
-        head_sha=$(git rev-parse HEAD)
-
-        if [[ -n "$existing" ]]; then
-          if [[ "$existing" == "$head_sha" ]]; then
-            echo "::notice::gitcalver: tag $VERSION already exists at HEAD"
-            exit 0
-          else
-            echo "::error::gitcalver: tag $VERSION already exists on a different commit ($existing)"
-            exit 1
-          fi
-        fi
-
-        git tag -- "$VERSION" HEAD
-        git push origin "refs/tags/$VERSION"
-        echo "::notice::gitcalver: created and pushed tag $VERSION"
+        bash "${GITHUB_ACTION_PATH}/action/publish.sh"

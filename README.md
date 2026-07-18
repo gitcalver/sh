@@ -117,7 +117,11 @@ those mechanisms rewrite commit ancestry.
     prefix: 'v'
 ```
 
-Outputs: `version`, `date`, `count`, `dirty`, `hash`.
+The `remote` input selects the cached remote used for branch detection; version
+calculation does not fetch it. Outputs are `version`, `date`, `count`, `dirty`,
+`hash`, and `tag`. The `tag` output is `tag-prefix` followed by `version`, which
+lets a package version such as `0.20260411.3` use a tag such as
+`v0.20260411.3`.
 
 ### Tagging
 
@@ -127,19 +131,25 @@ Set `tag: true` to create and push a lightweight git tag:
 permissions:
   contents: write
 
+concurrency: release
+
 steps:
   - uses: actions/checkout@v6
     with:
       fetch-depth: 0
   - uses: gitcalver/sh@main
+    id: version
     with:
-      prefix: 'v'
+      prefix: '0.'
+      tag-prefix: 'v'
       tag: 'true'
 ```
 
-The tag name is the full version string (including any prefix). Dirty versions
-are never tagged. If the tag already exists at HEAD (e.g. on a workflow re-run),
-the step succeeds without creating a duplicate.
+Publication refreshes the selected branch and the matching tags from `remote`,
+then requires HEAD to be its current tip. The numerically greatest matching tag
+must point to HEAD's first-parent history and its date segment must match its
+commit. The new lightweight tag is claimed without force; a matching tag at
+HEAD makes a workflow retry succeed idempotently, while any mismatch fails.
 
 ### Exit codes
 

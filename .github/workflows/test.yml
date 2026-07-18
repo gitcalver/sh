@@ -42,21 +42,26 @@ jobs:
           COUNT: ${{ steps.version.outputs.count }}
           DIRTY: ${{ steps.version.outputs.dirty }}
           HASH: ${{ steps.version.outputs.hash }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           echo "version=$VERSION"
           echo "date=$DATE"
           echo "count=$COUNT"
           echo "dirty=$DIRTY"
           echo "hash=$HASH"
+          echo "tag=$TAG"
           echo "$VERSION" | grep -qE '^[0-9]{8}\.[0-9]+$'
           echo "$DATE" | grep -qE '^[0-9]{8}$'
           echo "$COUNT" | grep -qE '^[0-9]+$'
           [[ "$DIRTY" == "false" ]]
-          echo "$HASH" | grep -qE '^[0-9a-f]+$'
+          echo "$HASH" | grep -qE '^[0-9a-f]{7}$'
+          [[ "$TAG" == "$VERSION" ]]
       - uses: ./
         id: semver
         with:
           prefix: '0.'
+          tag-prefix: 'release/v'
+          remote: origin
           branch: ${{ github.head_ref || github.ref_name }}
       - uses: ./
         id: go
@@ -65,9 +70,11 @@ jobs:
           branch: ${{ github.head_ref || github.ref_name }}
       - env:
           SEMVER_VERSION: ${{ steps.semver.outputs.version }}
+          SEMVER_TAG: ${{ steps.semver.outputs.tag }}
           GO_VERSION: ${{ steps.go.outputs.version }}
         run: |
           echo "$SEMVER_VERSION" | grep -qE '^0\.[0-9]{8}\.[0-9]+$'
+          [[ "$SEMVER_TAG" == "release/v$SEMVER_VERSION" ]]
           echo "$GO_VERSION" | grep -qE '^v0\.[0-9]{8}\.[0-9]+$'
       - run: echo dirty > untracked.txt
       - uses: ./
