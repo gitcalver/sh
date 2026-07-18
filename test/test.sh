@@ -350,19 +350,170 @@ new_repo "empty_repo_test"
 assert_exit "empty repo" 1 \
     "$GITCALVER"
 
-# ---- Shallow clone ----
+# ---- Incomplete-history proofs ----
 
 new_repo "shallow_source"
-commit_at "2026-04-10T09:00:00Z" "c1"
-commit_at "2026-04-10T12:00:00Z" "c2"
-git clone --depth 1 "file://$TMPDIR_BASE/shallow_source" "$TMPDIR_BASE/shallow_clone" --quiet
-cd "$TMPDIR_BASE/shallow_clone"
-assert_exit "shallow clone rejected" 1 \
+commit_at "2026-04-08T09:00:00Z" "older"
+commit_at "2026-04-09T09:00:00Z" "previous day"
+commit_at "2026-04-10T09:00:00Z" "day start"
+SHALLOW_DAY_START=$(git rev-parse HEAD)
+commit_at "2026-04-10T12:00:00Z" "day end"
+SHALLOW_DAY_END=$(git rev-parse HEAD)
+commit_at "2026-04-11T09:00:00Z" "tip"
+SHALLOW_TIP=$(git rev-parse HEAD)
+
+# The tip's block is complete as soon as one older-date parent is present,
+# even though that parent is itself the shallow boundary.
+git clone --depth 2 "file://$TMPDIR_BASE/shallow_source" \
+    "$TMPDIR_BASE/shallow_tip_proved" --quiet
+cd "$TMPDIR_BASE/shallow_tip_proved"
+assert_output "shallow forward succeeds with older-date boundary" \
+    "20260411.1" \
     "$GITCALVER"
+assert_output "shallow reverse succeeds with older-date boundary" \
+    "$SHALLOW_TIP" \
+    "$GITCALVER" 20260411.1
+assert_exit "shallow reverse rejects incomplete older date block" 4 \
+    "$GITCALVER" 20260410.1
+assert_exit "shallow reverse cannot rule out hidden older date" 4 \
+    "$GITCALVER" 20260409.1
+assert_exit "shallow reverse rules out date newer than branch tip" 1 \
+    "$GITCALVER" 20260412.1
 
 git worktree add "$TMPDIR_BASE/shallow_worktree" HEAD --quiet 2>/dev/null
 cd "$TMPDIR_BASE/shallow_worktree"
-assert_exit "shallow clone worktree rejected" 1 \
+assert_output "shallow linked worktree uses common boundary" "20260411.1" \
+    "$GITCALVER"
+
+# A shallow boundary inside the requested date block cannot prove N.
+git clone --depth 3 "file://$TMPDIR_BASE/shallow_source" \
+    "$TMPDIR_BASE/shallow_inside_block" --quiet
+cd "$TMPDIR_BASE/shallow_inside_block"
+assert_exit "shallow forward rejects boundary inside date block" 4 \
+    "$GITCALVER" "$SHALLOW_DAY_END"
+assert_exit "shallow reverse rejects boundary inside date block" 4 \
+    "$GITCALVER" 20260410.1
+
+# Once the full date block and its older boundary are present, forward and
+# reverse calculations are both provable without the repository's oldest
+# commit.
+git clone --depth 4 "file://$TMPDIR_BASE/shallow_source" \
+    "$TMPDIR_BASE/shallow_block_proved" --quiet
+cd "$TMPDIR_BASE/shallow_block_proved"
+assert_output "shallow explicit revision with complete date block" \
+    "20260410.2" \
+    "$GITCALVER" "$SHALLOW_DAY_END"
+assert_output "shallow reverse first commit in complete date block" \
+    "$SHALLOW_DAY_START" \
+    "$GITCALVER" 20260410.1
+assert_output "shallow reverse last commit in complete date block" \
+    "$SHALLOW_DAY_END" \
+    "$GITCALVER" 20260410.2
+
+# Positive reachability is proof even when older selected-branch history is
+# shallow. A negative result remains inconclusive until both histories reach
+# real roots.
+cd "$TMPDIR_BASE/shallow_tip_proved"
+git config user.email "test@test.com"
+git config user.name "Test"
+git checkout -b feature --quiet
+commit_at "2026-04-12T09:00:00Z" "feature"
+SHALLOW_FEATURE=$(git rev-parse HEAD)
+SHALLOW_FEATURE_SHORT=$(printf '%.7s' "$SHALLOW_FEATURE")
+git checkout main --quiet
+assert_output "shallow off-chain anchor succeeds when reachable" \
+    "20260411.1-dirty.${SHALLOW_FEATURE_SHORT}" \
+    "$GITCALVER" --dirty "-dirty" "$SHALLOW_FEATURE"
+git checkout --orphan orphan --quiet
+commit_at "2026-04-12T10:00:00Z" "orphan"
+SHALLOW_ORPHAN=$(git rev-parse HEAD)
+assert_exit "shallow negative branch relationship is unprovable" 4 \
+    "$GITCALVER" --branch main "$SHALLOW_ORPHAN"
+
+# A blob-filtered partial clone has every commit needed by GitCalVer, so its
+# absent trees and blobs do not prevent an offline calculation.
+new_repo "partial_source"
+echo "one" >partial.txt
+git add partial.txt
+GIT_COMMITTER_DATE="2026-04-10T09:00:00Z" \
+    git commit -m "one" --quiet --date="2026-04-10T09:00:00Z"
+echo "two" >partial.txt
+git add partial.txt
+GIT_COMMITTER_DATE="2026-04-11T09:00:00Z" \
+    git commit -m "two" --quiet --date="2026-04-11T09:00:00Z"
+PARTIAL_TIP=$(git rev-parse HEAD)
+PARTIAL_PARENT=$(git rev-parse HEAD^)
+git config uploadpack.allowFilter true
+git clone --filter=blob:none --no-checkout \
+    "file://$TMPDIR_BASE/partial_source" "$TMPDIR_BASE/partial_clone" --quiet
+cd "$TMPDIR_BASE/partial_clone"
+assert_output "partial clone succeeds without materializing blobs" \
+    "20260411.1" \
+    "$GITCALVER" HEAD
+assert_output "partial clone reverse lookup stays offline" "$PARTIAL_TIP" \
+    "$GITCALVER" 20260411.1
+
+# Build a promisor repository with only its tip commit. Reading the missing
+# first parent would normally start the configured remote helper. GitCalVer
+# must instead return 4 without invoking it.
+cd "$TMPDIR_BASE"
+git init -b main partial_missing --quiet
+cd partial_missing
+git config core.repositoryformatversion 1
+git config extensions.partialClone blocked
+git config remote.blocked.promisor true
+git config remote.blocked.partialCloneFilter blob:none
+git config remote.blocked.url "blocked::missing"
+PARTIAL_OBJECT_DIR=$(printf '%.2s' "$PARTIAL_TIP")
+PARTIAL_OBJECT_FILE=$(printf '%s' "$PARTIAL_TIP" | cut -c3-)
+mkdir -p ".git/objects/$PARTIAL_OBJECT_DIR"
+cp "$TMPDIR_BASE/partial_source/.git/objects/$PARTIAL_OBJECT_DIR/$PARTIAL_OBJECT_FILE" \
+    ".git/objects/$PARTIAL_OBJECT_DIR/$PARTIAL_OBJECT_FILE"
+git update-ref refs/heads/main "$PARTIAL_TIP"
+BLOCKED_BIN="$TMPDIR_BASE/blocked-bin"
+BLOCKED_MARKER="$TMPDIR_BASE/lazy-fetch-attempted"
+mkdir -p "$BLOCKED_BIN"
+printf '#!/bin/sh\n: >"%s"\nexit 1\n' "$BLOCKED_MARKER" \
+    >"$BLOCKED_BIN/git-remote-blocked"
+chmod +x "$BLOCKED_BIN/git-remote-blocked"
+set +e
+env PATH="$BLOCKED_BIN:$PATH" GIT_NO_LAZY_FETCH=0 \
+    git cat-file -e "$PARTIAL_PARENT^{commit}" >/dev/null 2>&1
+set -e
+if [ -e "$BLOCKED_MARKER" ]; then
+    pass "partial fixture attempts lazy fetch without safeguard"
+    rm "$BLOCKED_MARKER"
+else
+    fail "partial fixture attempts lazy fetch without safeguard" \
+        "remote helper invoked" "no remote-helper invocation"
+fi
+assert_exit "missing promised commit returns incomplete history" 4 \
+    env PATH="$BLOCKED_BIN:$PATH" "$GITCALVER" --branch main HEAD
+assert_exit "missing promised commit blocks reverse proof" 4 \
+    env PATH="$BLOCKED_BIN:$PATH" "$GITCALVER" --branch main 20260411.1
+if [ -e "$BLOCKED_MARKER" ]; then
+    fail "core calculation performs no lazy fetch" \
+        "no remote-helper invocation" "remote helper invoked"
+else
+    pass "core calculation performs no lazy fetch"
+fi
+
+# Replacement refs are ignored; the stored first-parent relationship wins.
+new_repo "replace_ref_ignored"
+commit_at "2026-04-10T09:00:00Z" "first"
+commit_at "2026-04-10T12:00:00Z" "second"
+git replace --graft HEAD
+assert_output "replace refs do not alter calculation" "20260410.2" \
+    "$GITCALVER"
+
+# Legacy graft files silently rewrite ancestry for normal Git commands, so an
+# implementation cannot use them as evidence about the canonical object graph.
+new_repo "graft_file_rejected"
+commit_at "2026-04-10T09:00:00Z" "first"
+commit_at "2026-04-10T12:00:00Z" "second"
+GRAFT_PATH=$(git rev-parse --git-common-dir)/info/grafts
+printf '%s\n' "$(git rev-parse HEAD)" >"$GRAFT_PATH"
+assert_exit "legacy graft file returns incomplete history" 4 \
     "$GITCALVER"
 
 # ---- --short in forward mode ----
@@ -524,6 +675,8 @@ GIT_COMMITTER_DATE="2026-04-10T09:00:00Z" \
     --date="2026-04-10T09:00:00Z"
 assert_exit "decreasing committer dates" 1 \
     "$GITCALVER"
+assert_exit "reverse lookup validates decreasing date boundary" 1 \
+    "$GITCALVER" 20260410.1
 
 # ---- Empty commit ----
 

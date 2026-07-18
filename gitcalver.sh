@@ -30,6 +30,7 @@ VERSION=""
 EXIT_ERROR=1
 EXIT_DIRTY=2
 EXIT_NOT_TRACEABLE=3
+EXIT_INCOMPLETE_HISTORY=4
 
 usage() {
     cat <<'EOF'
@@ -60,6 +61,7 @@ Exit codes:
   1   Error (not a git repo, no commits, decreasing dates, etc.)
   2   Dirty workspace or off default branch (without --dirty)
   3   Cannot trace to default branch
+  4   Local history is insufficient to prove the result
 EOF
     exit 0
 }
@@ -166,23 +168,48 @@ case "$PREFIX" in
 '*) die "--prefix must not contain a newline" ;;
 esac
 
+# Version calculation is local-only. In a partial clone, missing objects must
+# produce the incomplete-history result instead of implicitly contacting a
+# promisor remote. Replacement refs are also excluded so every invocation sees
+# the repository's actual object graph.
+GIT_NO_LAZY_FETCH=1
+GIT_NO_REPLACE_OBJECTS=1
+export GIT_NO_LAZY_FETCH GIT_NO_REPLACE_OBJECTS
+
 # --- Verify git repository ---
 
 git rev-parse --git-dir >/dev/null 2>&1 ||
     die "not a git repository"
 
+# Resolve repository metadata through the common directory so linked worktrees
+# see the same shallow boundary and deprecated graft file as the main worktree.
+GIT_COMMON_DIR=$(git rev-parse --git-common-dir) ||
+    die "cannot resolve git common directory"
+case "$GIT_COMMON_DIR" in
+/*) ;;
+*)
+    GIT_COMMON_DIR=$(cd "$GIT_COMMON_DIR" && pwd -P) ||
+        die "cannot resolve git common directory"
+    ;;
+esac
+
+SHALLOW_FILE="$GIT_COMMON_DIR/shallow"
+GRAFT_FILE="$GIT_COMMON_DIR/info/grafts"
+
+if [ -e "$GRAFT_FILE" ]; then
+    die "commit graft file is not supported: $GRAFT_FILE" \
+        "$EXIT_INCOMPLETE_HISTORY"
+fi
+
 # --- Verify commits exist ---
 
-git rev-parse HEAD >/dev/null 2>&1 ||
+HEAD_OID=$(git rev-parse --verify HEAD 2>/dev/null) ||
     die "no commits in repository"
+git cat-file -e "$HEAD_OID^{commit}" 2>/dev/null ||
+    die "HEAD commit is missing from local history" \
+        "$EXIT_INCOMPLETE_HISTORY"
 
 IS_BARE_REPOSITORY=$(git rev-parse --is-bare-repository)
-
-# --- Reject shallow clones ---
-
-if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
-    die "shallow clone detected; full history is required (use git fetch --unshallow)"
-fi
 
 # --- Determine and verify default branch ---
 
@@ -245,6 +272,37 @@ resolve_branch_tip() (
         git rev-parse --verify "refs/remotes/$REMOTE/$branch" 2>/dev/null
 )
 
+# Read the actual first parent for one locally available commit. This is used
+# only to distinguish a real root from a shallow or missing-parent boundary
+# after a bulk Git traversal has stopped; it is never called once per commit.
+get_stored_first_parent() {
+    commit_object=$(git cat-file commit "$1" 2>/dev/null) || return 1
+    STORED_FIRST_PARENT=$(printf '%s\n' "$commit_object" |
+        sed -n '/^$/q; s/^parent //p' | sed -n '1p')
+}
+
+# A negative reachability result is conclusive only when the target's known
+# ancestry did not stop at a shallow boundary and did not encounter a missing
+# promised commit.
+history_is_complete() (
+    git rev-list "$1" >/dev/null 2>&1 || exit "$EXIT_INCOMPLETE_HISTORY"
+    [ -f "$SHALLOW_FILE" ] || exit 0
+
+    while IFS= read -r boundary; do
+        [ -n "$boundary" ] || continue
+        if git merge-base --is-ancestor "$boundary" "$1" 2>/dev/null; then
+            get_stored_first_parent "$boundary" ||
+                exit "$EXIT_INCOMPLETE_HISTORY"
+            [ -z "$STORED_FIRST_PARENT" ] ||
+                exit "$EXIT_INCOMPLETE_HISTORY"
+        else
+            ancestor_status=$?
+            [ "$ancestor_status" -eq 1 ] ||
+                exit "$EXIT_INCOMPLETE_HISTORY"
+        fi
+    done <"$SHALLOW_FILE"
+)
+
 # Find the newest selected-chain commit reachable from an off-chain target.
 # Reachability considers every parent of the target, so a feature branch that
 # has merged the selected branch anchors at that newer selected-branch commit.
@@ -256,19 +314,43 @@ find_reachable_branch_anchor() (
     # walk. The oldest remaining commit is therefore the child of the newest
     # reachable anchor. If nothing remains, the selected tip itself is
     # reachable. A root with no first parent means the histories do not meet.
-    last_unreachable=$(git rev-list --first-parent "$branch_tip" "^$rev" \
-        2>/dev/null | tail -n 1)
-    if [ -z "$last_unreachable" ]; then
+    unreachable_count=$(git rev-list --count --first-parent \
+        "$branch_tip" "^$rev" 2>/dev/null) ||
+        exit "$EXIT_INCOMPLETE_HISTORY"
+    if [ "$unreachable_count" -eq 0 ]; then
         printf '%s\n' "$branch_tip"
-    else
-        git rev-parse --verify "${last_unreachable}^1" 2>/dev/null || true
+        exit 0
     fi
+
+    if anchor=$(git rev-parse --verify \
+        "$branch_tip~$unreachable_count^{commit}" 2>/dev/null); then
+        printf '%s\n' "$anchor"
+        exit 0
+    fi
+
+    # The selected walk either reached a real root or stopped at incomplete
+    # history. Inspect only its last known commit to distinguish those cases.
+    last_index=$((unreachable_count - 1))
+    last_unreachable=$(git rev-parse --verify \
+        "$branch_tip~$last_index^{commit}" 2>/dev/null) ||
+        exit "$EXIT_INCOMPLETE_HISTORY"
+    get_stored_first_parent "$last_unreachable" ||
+        exit "$EXIT_INCOMPLETE_HISTORY"
+    [ -z "$STORED_FIRST_PARENT" ] || exit "$EXIT_INCOMPLETE_HISTORY"
+
+    # The selected walk reached a real root. The histories are conclusively
+    # unrelated only if the target walk is complete as well.
+    history_is_complete "$rev" || exit "$EXIT_INCOMPLETE_HISTORY"
+    exit "$EXIT_NOT_TRACEABLE"
 )
 
 # Cache the selected branch tip once so every calculation in this invocation
 # uses the same local view even if another process updates a ref concurrently.
 DEFAULT_BRANCH_TIP=$(resolve_branch_tip "$DEFAULT_BRANCH") ||
     die "cannot resolve default branch: $DEFAULT_BRANCH"
+git cat-file -e "$DEFAULT_BRANCH_TIP^{commit}" 2>/dev/null ||
+    die "selected branch tip is missing from local history: $DEFAULT_BRANCH" \
+        "$EXIT_INCOMPLETE_HISTORY"
 
 # Match a bare YYYYMMDD.N version string.
 # Outputs the version on success, produces no output on failure.
@@ -318,6 +400,95 @@ if [ -n "$PREFIX" ] && [ -n "$CORE" ] && [ "$LOOKUP" = "$POSITIONAL" ]; then
     die "version $POSITIONAL is missing required prefix \"$PREFIX\""
 fi
 
+find_version_commit() (
+    target_date="$1"
+    target_n="$2"
+    branch_tip="$3"
+
+    # Stream one first-parent log through awk. It emits a single constant-size
+    # result as soon as the target date block and its older boundary are known;
+    # reverse lookup therefore uses O(date-block) memory inside awk and only
+    # one Git process, even when the requested version is deep in history.
+    result=$(TZ=UTC git log "$branch_tip" --first-parent \
+        --format='%H%x09%cd' --date=format-local:'%Y%m%d' 2>/dev/null |
+        awk -F '\t' -v td="$target_date" -v tn="$target_n" '
+            function emit_found(state,    idx) {
+                idx = count - tn + 1
+                if (idx >= 1 && idx <= count) {
+                    print state, hashes[idx], last
+                } else {
+                    print state, "-", last
+                }
+                done = 1
+            }
+            NR > 1 && ($2 + 0) > (newer + 0) {
+                print "decreasing", $2, newer
+                done = 1
+                exit
+            }
+            {
+                newer = $2
+                last = $1
+                if ($2 == td) {
+                    hashes[++count] = $1
+                    next
+                }
+                if (($2 + 0) < (td + 0)) {
+                    if (count > 0) {
+                        emit_found("found")
+                    } else {
+                        print "notfound"
+                        done = 1
+                    }
+                    exit
+                }
+            }
+            END {
+                if (done) exit
+                if (NR == 0) {
+                    print "missing"
+                } else if (count > 0) {
+                    emit_found("boundary")
+                } else {
+                    print "boundary", "-", last
+                }
+            }
+        ')
+
+    read -r state value detail <<EOF
+$result
+EOF
+    state=${state:-missing}
+    case "$state" in
+    found)
+        [ "$value" != "-" ] || die "version not found: $POSITIONAL"
+        printf '%s\n' "$value"
+        ;;
+    notfound)
+        die "version not found: $POSITIONAL"
+        ;;
+    decreasing)
+        die "committer dates go backwards (found $value after $detail in history)"
+        ;;
+    boundary)
+        candidate=$value
+        last=$detail
+        get_stored_first_parent "$last" ||
+            die "local history ended before version could be proved" \
+                "$EXIT_INCOMPLETE_HISTORY"
+        [ -z "$STORED_FIRST_PARENT" ] ||
+            die "local history ended before version could be proved" \
+                "$EXIT_INCOMPLETE_HISTORY"
+        [ "$candidate" != "-" ] || die "version not found: $POSITIONAL"
+        printf '%s\n' "$candidate"
+        ;;
+    *)
+        die "local history ended before version could be proved" \
+            "$EXIT_INCOMPLETE_HISTORY"
+        ;;
+    esac
+)
+
 if [ -n "$CORE" ]; then
     TARGET_DATE=${CORE%%.*}
     TARGET_N=${CORE#*.}
@@ -328,22 +499,12 @@ if [ -n "$CORE" ]; then
     [ "$TARGET_N" -gt 0 ] 2>/dev/null ||
         die "invalid count in version: $POSITIONAL"
 
-    # Walk first-parent history to find the commit
-    FOUND=$(TZ=UTC git log "$DEFAULT_BRANCH_TIP" --first-parent \
-        --format='%H %cd' --date=format-local:'%Y%m%d' |
-        awk -v td="$TARGET_DATE" -v tn="$TARGET_N" '
-            $2 == td { hashes[++count] = $1; next }
-            count > 0 { exit }
-            $2 + 0 < td + 0 { exit }
-            END {
-                if (count > 0) {
-                    idx = count - tn + 1
-                    if (idx >= 1 && idx <= count) print hashes[idx]
-                }
-            }
-        ')
-
-    [ -n "$FOUND" ] || die "version not found: $POSITIONAL"
+    if FOUND=$(find_version_commit \
+        "$TARGET_DATE" "$TARGET_N" "$DEFAULT_BRANCH_TIP"); then
+        :
+    else
+        exit $?
+    fi
 
     if $SHORT_HASH; then
         printf '%.7s\n' "$FOUND"
@@ -365,8 +526,15 @@ if $TARGET_SET; then
     # 0, so the "validation" would pass and the attacker-controlled string would
     # flow on into git merge-base/git log as an option. --verify forces a single
     # resolved revision and rejects anything that is not one.
-    REV=$(git rev-parse --verify "$POSITIONAL^{commit}" 2>/dev/null) ||
+    if REV=$(git rev-parse --verify "$POSITIONAL^{commit}" 2>/dev/null); then
+        :
+    elif RESOLVED_REV=$(git rev-parse --verify "$POSITIONAL" 2>/dev/null) &&
+        ! git cat-file -e "$RESOLVED_REV" 2>/dev/null; then
+        die "revision is missing from local history: $POSITIONAL" \
+            "$EXIT_INCOMPLETE_HISTORY"
+    else
         die "not a gitcalver version or git revision: $POSITIONAL"
+    fi
 else
     REV=$(git rev-parse --verify 'HEAD^{commit}' 2>/dev/null) ||
         die "no commits in repository"
@@ -374,8 +542,15 @@ fi
 
 OFF_BRANCH=false
 DIRTY_REV="$REV"
-BRANCH_ANCHOR=$(find_reachable_branch_anchor "$REV" "$DEFAULT_BRANCH_TIP")
-if [ -z "$BRANCH_ANCHOR" ]; then
+if BRANCH_ANCHOR=$(find_reachable_branch_anchor \
+    "$REV" "$DEFAULT_BRANCH_TIP"); then
+    :
+else
+    anchor_status=$?
+    if [ "$anchor_status" -eq "$EXIT_INCOMPLETE_HISTORY" ]; then
+        die "local history cannot prove the target's selected-branch relationship" \
+            "$EXIT_INCOMPLETE_HISTORY"
+    fi
     if ! $TARGET_SET; then
         die "cannot trace HEAD to the default branch ($DEFAULT_BRANCH)" \
             "$EXIT_NOT_TRACEABLE"
@@ -395,9 +570,11 @@ IS_DIRTY=false
 if ! $TARGET_SET; then
     if $OFF_BRANCH; then
         IS_DIRTY=true
-    elif [ "$IS_BARE_REPOSITORY" = "false" ] &&
-        git status --porcelain 2>/dev/null | grep -q .; then
-        IS_DIRTY=true
+    elif [ "$IS_BARE_REPOSITORY" = "false" ]; then
+        WORKTREE_STATUS=$(git status --porcelain 2>/dev/null) ||
+            die "local history cannot prove workspace state" \
+                "$EXIT_INCOMPLETE_HISTORY"
+        [ -z "$WORKTREE_STATUS" ] || IS_DIRTY=true
     fi
 elif $OFF_BRANCH; then
     IS_DIRTY=true
@@ -413,24 +590,72 @@ fi
 
 # --- Compute version ---
 
-# Walk first-parent history: extract the commit's date and count consecutive
-# same-day commits in a single git invocation.
-read -r DATE COUNT PREV_DATE <<EOF
-$(TZ=UTC git log "$REV" --first-parent --format='%cd' --date=format-local:'%Y%m%d' |
-    awk '
-        NR == 1 { d = $0; n = 1; next }
-        $0 == d { n++; next }
-        { print d, n, $0; exit }
-        END { if (NR == n) print d, n, "" }
-    ')
-EOF
+# Walk only as far as the first different-date commit. A shallow or partial
+# boundary is safe after that commit has supplied the earlier date; inside the
+# target's date block it makes the count unprovable.
+compute_version_fields() (
+    result=$(TZ=UTC git log "$1" --first-parent \
+        --format='%H%x09%cd' --date=format-local:'%Y%m%d' 2>/dev/null |
+        awk -F '\t' '
+            NR == 1 {
+                date = $2
+                count = 1
+                last = $1
+                next
+            }
+            $2 == date {
+                count++
+                last = $1
+                next
+            }
+            {
+                print "complete", date, count, $2
+                done = 1
+                exit
+            }
+            END {
+                if (done) exit
+                if (NR == 0) {
+                    print "missing"
+                } else {
+                    print "boundary", date, count, last
+                }
+            }
+        ')
 
-# Validate non-decreasing committer dates at the boundary. This only checks
-# the transition between the current date block and the immediately preceding
-# one; a non-monotonic sequence deeper in history (e.g. after a complex rebase)
-# would not be caught here.
-if [ -n "$PREV_DATE" ] && [ "$PREV_DATE" -gt "$DATE" ]; then
-    die "committer dates go backwards (found $PREV_DATE after $DATE in history)"
+    read -r state date count boundary_date <<EOF
+$result
+EOF
+    state=${state:-missing}
+    case "$state" in
+    complete)
+        if [ "$boundary_date" -gt "$date" ]; then
+            die "committer dates go backwards (found $boundary_date after $date in history)"
+        fi
+        printf '%s %s\n' "$date" "$count"
+        ;;
+    boundary)
+        get_stored_first_parent "$boundary_date" ||
+            die "local history ended inside the target date block" \
+                "$EXIT_INCOMPLETE_HISTORY"
+        [ -z "$STORED_FIRST_PARENT" ] ||
+            die "local history ended inside the $date date block" \
+                "$EXIT_INCOMPLETE_HISTORY"
+        printf '%s %s\n' "$date" "$count"
+        ;;
+    *)
+        die "local history ended inside the target date block" \
+            "$EXIT_INCOMPLETE_HISTORY"
+        ;;
+    esac
+)
+
+if VERSION_FIELDS=$(compute_version_fields "$REV"); then
+    read -r DATE COUNT <<EOF
+$VERSION_FIELDS
+EOF
+else
+    exit $?
 fi
 
 # --- Format output ---

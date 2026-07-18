@@ -82,6 +82,18 @@ lookup; bare versions without the prefix are rejected.
 
 Dirty versions cannot be reversed.
 
+### Incomplete histories
+
+Version calculation never fetches. Shallow and partial clones work when the
+local objects prove the target's selected-branch relationship and contain the
+complete relevant UTC date block plus its older date boundary. If a missing
+commit prevents either proof, gitcalver exits with status 4; deepen or fetch the
+repository explicitly before retrying.
+
+Missing trees and blobs do not affect calculation. Replacement refs are
+ignored, and repositories with a legacy `info/grafts` file are rejected because
+those mechanisms rewrite commit ancestry.
+
 ### Options
 
 | Option              | Description                                    |
@@ -137,3 +149,4 @@ the step succeeds without creating a duplicate.
 | 1    | Invalid input, repository state, version date, or commit history   |
 | 2    | Dirty workspace or off-chain target refused without `--dirty`      |
 | 3    | Target cannot be traced to the selected branch                     |
+| 4    | Local history cannot prove membership, anchor, or complete date block |
