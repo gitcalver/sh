@@ -1,43 +1,109 @@
 name: Release
 on:
-  push:
+  workflow_run:
+    workflows: [Test]
+    types: [completed]
     branches: [main]
 
 concurrency: release
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
       - uses: ./
         id: version
         with:
-          prefix: 'v'
-          tag: 'true'
-      - name: Stamp VERSION and publish release
+          tag-prefix: 'v'
+      - name: Build stamped release asset
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.version }}
-          VERSION_DATE: ${{ steps.version.outputs.date }}
-          VERSION_COUNT: ${{ steps.version.outputs.count }}
+          ARTIFACT: ${{ runner.temp }}/gitcalver.sh
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          tag="$TAG"
-          version="${VERSION_DATE}.${VERSION_COUNT}"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            echo "Release $tag already exists, skipping"
-            exit 0
+          sed 's|^VERSION=""$|VERSION="'"$VERSION"'"|' \
+            gitcalver.sh > "$ARTIFACT"
+          chmod +x "$ARTIFACT"
+          actual=$("$ARTIFACT" --version)
+          [[ "$actual" == "gitcalver $VERSION" ]] || {
+            echo "Stamp verification failed: $actual" >&2
+            exit 1
+          }
+      - uses: ./
+        id: publish
+        with:
+          tag-prefix: 'v'
+          tag: 'true'
+      - name: Publish immutable release
+        env:
+          ARTIFACT: ${{ runner.temp }}/gitcalver.sh
+          BUILT_TAG: ${{ steps.version.outputs.tag }}
+          BUILT_VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.publish.outputs.tag }}
+          VERSION: ${{ steps.publish.outputs.version }}
+        run: |
+          [[ "$VERSION" == "$BUILT_VERSION" && "$TAG" == "$BUILT_TAG" ]] || {
+            echo "Published version changed after the asset was built" >&2
+            exit 1
+          }
+
+          verify_published() {
+            local state asset_names verify_dir
+            state=$(gh release view "$TAG" \
+              --json isDraft,name \
+              --jq '[.isDraft, .name] | @tsv')
+            [[ "$state" == $'false\t'"$VERSION" ]] || {
+              echo "Release $TAG is not the expected published release: $state" >&2
+              return 1
+            }
+            asset_names=$(gh release view "$TAG" --json assets \
+              --jq '.assets[].name')
+            [[ "$asset_names" == gitcalver.sh ]] || {
+              echo "Release $TAG has unexpected assets: $asset_names" >&2
+              return 1
+            }
+            verify_dir=$(mktemp -d "${RUNNER_TEMP}/published-release.XXXXXX")
+            gh release download "$TAG" --pattern gitcalver.sh --dir "$verify_dir"
+            cmp "$ARTIFACT" "$verify_dir/gitcalver.sh"
+          }
+
+          if draft=$(gh release view "$TAG" --json isDraft \
+            --jq '.isDraft' 2>/dev/null); then
+            if [[ "$draft" == false ]]; then
+              verify_published
+              echo "Release $TAG already exists and matches"
+              exit 0
+            fi
+            [[ "$draft" == true ]] || {
+              echo "Release $TAG returned an invalid draft state: $draft" >&2
+              exit 1
+            }
+            gh release delete "$TAG" --yes
           fi
-          sed -i 's|^VERSION=""$|VERSION="'"$version"'"|' gitcalver.sh
-          actual=$(./gitcalver.sh --version)
-          [ "$actual" = "gitcalver $version" ] \
-            || { echo "Stamp verification failed: $actual" >&2; exit 1; }
-          gh release create "$tag" gitcalver.sh \
-            --title "$version" \
-            --notes "gitcalver.sh $version" \
+
+          gh release create "$TAG" "$ARTIFACT" \
+            --draft \
+            --verify-tag \
+            --title "$VERSION" \
+            --notes "gitcalver.sh $VERSION"
+
+          verify_dir="${RUNNER_TEMP}/release-verify"
+          mkdir -p "$verify_dir"
+          gh release download "$TAG" --pattern gitcalver.sh --dir "$verify_dir"
+          cmp "$ARTIFACT" "$verify_dir/gitcalver.sh"
+
+          gh release edit "$TAG" \
+            --draft=false \
             --latest
+          verify_published
