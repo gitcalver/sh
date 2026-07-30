@@ -344,6 +344,121 @@ find_reachable_branch_anchor() (
     exit "$EXIT_NOT_TRACEABLE"
 )
 
+# Compute REV's UTC committer date and the size of its date cohort: the
+# commits reachable from REV through any parent, visiting each one once,
+# where a same-date commit is counted and its parents explored; a strictly
+# older commit is visited (to learn its date) but not explored past; and a
+# strictly newer commit invalidates the result and dies. This is a pruned
+# walk, not a full reachability scan: a same-date commit sitting behind an
+# older-dated commit is never reached, so it is not counted, and a
+# newer-dated commit buried behind an older-dated commit is never reached
+# either, so it is tolerated rather than rejected. Visiting REV's own parents
+# first (REV is trivially a member of its own cohort) means this same walk
+# also performs the "committer dates go backwards" check that a first-parent-
+# only chain walk would need separately, generalized to every parent instead
+# of only the first. Prints "DATE COUNT". Defined ahead of reverse lookup,
+# which also calls it once per date-block member.
+compute_version_fields() (
+    # rev is always a full object ID -- forward resolution, anchor lookup,
+    # and reverse's block members all pass resolved hashes -- so it can
+    # index the dump's %H fields directly as the walk's starting node.
+    rev="$1"
+
+    dump=$(TZ=UTC git log "$rev" --format='%H%x09%P%x09%cd' \
+        --date=format-local:'%Y%m%d' 2>/dev/null) ||
+        die "local history cannot prove the target's date cohort" \
+            "$EXIT_INCOMPLETE_HISTORY"
+
+    result=$(printf '%s\n' "$dump" | awk -F '\t' -v root="$rev" '
+        {
+            date_of[$1] = $3
+            parents[$1] = $2
+            known[$1] = 1
+        }
+        END {
+            if (!(root in known)) {
+                print "missing"
+                exit
+            }
+            target = date_of[root]
+            queue[1] = root
+            visited[root] = 1
+            qn = 1
+            count = 0
+            plist = ""
+            i = 1
+            while (i <= qn) {
+                cur = queue[i]
+                i++
+                count++
+                # A literal single space as the third argument requests the
+                # whitespace-collapsing split regardless of FS (set to a tab
+                # above, for the record columns); a bare two-argument split
+                # would instead split on that tab.
+                nump = split(parents[cur], p, " ")
+                if (nump == 0) {
+                    plist = plist cur "\n"
+                    continue
+                }
+                for (k = 1; k <= nump; k++) {
+                    par = p[k]
+                    if (visited[par]) continue
+                    visited[par] = 1
+                    if (!(par in known)) {
+                        print "missing"
+                        exit
+                    }
+                    if (date_of[par] == target) {
+                        qn++
+                        queue[qn] = par
+                    } else if ((date_of[par] + 0) > (target + 0)) {
+                        print "reject", date_of[par], target
+                        exit
+                    }
+                    # Strictly older: its date is now known, but it is not
+                    # queued, so its own parents are never examined.
+                }
+            }
+            print "count", target, count
+            printf "%s", plist
+        }')
+
+    read -r state a b <<EOF
+$result
+EOF
+    state=${state:-missing}
+    case "$state" in
+    count)
+        date=$a
+        count=$b
+        # Every cohort member that appeared parentless in the dump must be a
+        # genuine root, not a shallow or partial-clone cut hiding a same-date
+        # ancestor, exactly as a first-parent-only walk already had to prove
+        # at its single boundary.
+        plist=$(printf '%s\n' "$result" | sed '1d')
+        while IFS= read -r node; do
+            [ -n "$node" ] || continue
+            get_stored_first_parent "$node" ||
+                die "local history cannot prove the target's date cohort" \
+                    "$EXIT_INCOMPLETE_HISTORY"
+            [ -z "$STORED_FIRST_PARENT" ] ||
+                die "local history cannot prove the target's date cohort" \
+                    "$EXIT_INCOMPLETE_HISTORY"
+        done <<EOF
+$plist
+EOF
+        printf '%s %s\n' "$date" "$count"
+        ;;
+    reject)
+        die "committer dates go backwards (found $a after $b in history)"
+        ;;
+    missing | *)
+        die "local history cannot prove the target's date cohort" \
+            "$EXIT_INCOMPLETE_HISTORY"
+        ;;
+    esac
+)
+
 # Cache the selected branch tip once so every calculation in this invocation
 # uses the same local view even if another process updates a ref concurrently.
 DEFAULT_BRANCH_TIP=$(resolve_branch_tip "$DEFAULT_BRANCH") ||
@@ -405,22 +520,16 @@ find_version_commit() (
     target_n="$2"
     branch_tip="$3"
 
-    # Stream one first-parent log through awk. It emits a single constant-size
-    # result as soon as the target date block and its older boundary are known;
-    # reverse lookup therefore uses O(date-block) memory inside awk and only
-    # one Git process, even when the requested version is deep in history.
+    # Stream one first-parent log through awk to delimit the target date's
+    # block on the selected branch and prove its older boundary, exactly as
+    # 0.2 did. This no longer determines N by itself: under cohort counting, a
+    # block member's N can include commits reachable only through a second
+    # parent, so N is not a function of position within this first-parent
+    # block. It emits the full block instead (newest to oldest, matching the
+    # order commits are encountered), for the per-member scan below.
     result=$(TZ=UTC git log "$branch_tip" --first-parent \
         --format='%H%x09%cd' --date=format-local:'%Y%m%d' 2>/dev/null |
-        awk -F '\t' -v td="$target_date" -v tn="$target_n" '
-            function emit_found(state,    idx) {
-                idx = count - tn + 1
-                if (idx >= 1 && idx <= count) {
-                    print state, hashes[idx], last
-                } else {
-                    print state, "-", last
-                }
-                done = 1
-            }
+        awk -F '\t' -v td="$target_date" '
             NR > 1 && ($2 + 0) > (newer + 0) {
                 print "decreasing", $2, newer
                 done = 1
@@ -434,11 +543,12 @@ find_version_commit() (
                     next
                 }
                 if (($2 + 0) < (td + 0)) {
+                    done = 1
                     if (count > 0) {
-                        emit_found("found")
+                        print "found", last
+                        for (i = count; i >= 1; i--) print hashes[i]
                     } else {
                         print "notfound"
-                        done = 1
                     }
                     exit
                 }
@@ -447,11 +557,10 @@ find_version_commit() (
                 if (done) exit
                 if (NR == 0) {
                     print "missing"
-                } else if (count > 0) {
-                    emit_found("boundary")
-                } else {
-                    print "boundary", "-", last
+                    exit
                 }
+                print "boundary", last
+                for (i = count; i >= 1; i--) print hashes[i]
             }
         ')
 
@@ -460,10 +569,7 @@ $result
 EOF
     state=${state:-missing}
     case "$state" in
-    found)
-        [ "$value" != "-" ] || die "version not found: $POSITIONAL"
-        printf '%s\n' "$value"
-        ;;
+    found) ;;
     notfound)
         die "version not found: $POSITIONAL"
         ;;
@@ -471,22 +577,47 @@ EOF
         die "committer dates go backwards (found $value after $detail in history)"
         ;;
     boundary)
-        candidate=$value
-        last=$detail
-        get_stored_first_parent "$last" ||
+        get_stored_first_parent "$value" ||
             die "local history ended before version could be proved" \
                 "$EXIT_INCOMPLETE_HISTORY"
         [ -z "$STORED_FIRST_PARENT" ] ||
             die "local history ended before version could be proved" \
                 "$EXIT_INCOMPLETE_HISTORY"
-        [ "$candidate" != "-" ] || die "version not found: $POSITIONAL"
-        printf '%s\n' "$candidate"
         ;;
     *)
         die "local history ended before version could be proved" \
             "$EXIT_INCOMPLETE_HISTORY"
         ;;
     esac
+
+    # The target-date block is proved complete; walk its members oldest to
+    # newest, computing each one's own date cohort independently. Cohort size
+    # strictly increases between chain-adjacent members (a member's cohort
+    # always contains its first-parent predecessor's cohort plus itself), so
+    # once a member's count passes the requested N, no later member can equal
+    # it either: stop and report not found rather than searching further.
+    block=$(printf '%s\n' "$result" | sed '1d')
+    while IFS= read -r member; do
+        [ -n "$member" ] || continue
+        if MEMBER_FIELDS=$(compute_version_fields "$member"); then
+            :
+        else
+            exit $?
+        fi
+        read -r _ member_count <<FIELDS
+$MEMBER_FIELDS
+FIELDS
+        if [ "$member_count" -eq "$target_n" ]; then
+            printf '%s\n' "$member"
+            exit 0
+        elif [ "$member_count" -gt "$target_n" ]; then
+            break
+        fi
+    done <<BLOCK
+$block
+BLOCK
+
+    die "version not found: $POSITIONAL"
 )
 
 if [ -n "$CORE" ]; then
@@ -589,66 +720,6 @@ if $IS_DIRTY && { $NO_DIRTY || ! $DIRTY_SET; }; then
 fi
 
 # --- Compute version ---
-
-# Walk only as far as the first different-date commit. A shallow or partial
-# boundary is safe after that commit has supplied the earlier date; inside the
-# target's date block it makes the count unprovable.
-compute_version_fields() (
-    result=$(TZ=UTC git log "$1" --first-parent \
-        --format='%H%x09%cd' --date=format-local:'%Y%m%d' 2>/dev/null |
-        awk -F '\t' '
-            NR == 1 {
-                date = $2
-                count = 1
-                last = $1
-                next
-            }
-            $2 == date {
-                count++
-                last = $1
-                next
-            }
-            {
-                print "complete", date, count, $2
-                done = 1
-                exit
-            }
-            END {
-                if (done) exit
-                if (NR == 0) {
-                    print "missing"
-                } else {
-                    print "boundary", date, count, last
-                }
-            }
-        ')
-
-    read -r state date count boundary_date <<EOF
-$result
-EOF
-    state=${state:-missing}
-    case "$state" in
-    complete)
-        if [ "$boundary_date" -gt "$date" ]; then
-            die "committer dates go backwards (found $boundary_date after $date in history)"
-        fi
-        printf '%s %s\n' "$date" "$count"
-        ;;
-    boundary)
-        get_stored_first_parent "$boundary_date" ||
-            die "local history ended inside the target date block" \
-                "$EXIT_INCOMPLETE_HISTORY"
-        [ -z "$STORED_FIRST_PARENT" ] ||
-            die "local history ended inside the $date date block" \
-                "$EXIT_INCOMPLETE_HISTORY"
-        printf '%s %s\n' "$date" "$count"
-        ;;
-    *)
-        die "local history ended inside the target date block" \
-            "$EXIT_INCOMPLETE_HISTORY"
-        ;;
-    esac
-)
 
 if VERSION_FIELDS=$(compute_version_fields "$REV"); then
     read -r DATE COUNT <<EOF

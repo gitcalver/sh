@@ -538,7 +538,7 @@ assert_exit "multi-line argument not treated as version" 1 \
 
 # ---- First-parent / merge behavior ----
 
-new_repo "merge_no_inflate"
+new_repo "merge_counts_second_parent_cohort"
 commit_at "2026-04-10T09:00:00Z" "main-1"
 git checkout -b feature --quiet
 commit_at "2026-04-10T10:00:00Z" "feature-1"
@@ -548,8 +548,11 @@ git checkout main --quiet
 GIT_COMMITTER_DATE="2026-04-10T13:00:00Z" \
     GIT_AUTHOR_DATE="2026-04-10T13:00:00Z" \
     git merge feature --no-ff -m "merge feature" --quiet
-# First-parent: main-1 + merge commit = 2, not 5
-assert_output "merges don't inflate count" "20260410.2" \
+# N is the date cohort, not first-parent position: main-1 + merge commit +
+# feature-1, feature-2, feature-3 (all same UTC date, reachable through the
+# merge's second parent) = 5.
+assert_output "merge counts same-date commits reachable through any parent" \
+    "20260410.5" \
     "$GITCALVER"
 
 new_repo "merged_side_branch_not_clean"
@@ -570,7 +573,9 @@ assert_exit "merged side-branch revision is not clean" 2 \
 assert_output "merged side-branch revision anchors at branch divergence" \
     "20260410.1-dirty.${FEATURE_SHORT}" \
     "$GITCALVER" --dirty "-dirty" "$FEATURE_REV"
-assert_output "merge commit remains on first-parent chain" "20260410.3" \
+# Cohort: merge + main + base (main's first parent) + feature (base's other
+# child, reachable through the merge's second parent) = 4, not 3.
+assert_output "merge commit remains on first-parent chain" "20260410.4" \
     "$GITCALVER"
 
 new_repo "diverged_branch_anchor"
@@ -604,6 +609,212 @@ git checkout main --quiet
 assert_output "off-chain target uses newest reachable branch anchor" \
     "20260411.2-dirty.${FEATURE_MERGE_SHORT}" \
     "$GITCALVER" --dirty "-dirty" "$FEATURE_MERGE"
+
+# ---- Pruned-walk cohort counting ----
+#
+# N is the size of the target's date cohort: commits reachable from it
+# through any parent, visiting each once, where a same-date commit is
+# counted and its parents explored, a strictly older commit is visited (to
+# learn its date) but not explored past, and a strictly newer commit
+# invalidates the result. This differs observably from a flat reachable-set
+# scan: a same-date commit sitting behind an older-dated commit is not
+# counted, and a newer-dated commit buried behind an older-dated commit is
+# never visited, hence tolerated rather than rejected.
+
+new_repo "incident_reparenting"
+commit_at "2026-04-09T09:00:00Z" "base"
+git checkout -b feature --quiet
+commit_at "2026-04-10T09:00:00Z" "feature-1"
+FEATURE1_REV=$(git rev-parse HEAD)
+git checkout main --quiet
+commit_at "2026-04-10T10:00:00Z" "main-2"
+# Before reparenting: main-2's cohort is only itself (base is older, pruned).
+assert_output "incident topology: before reparenting" "20260410.1" \
+    "$GITCALVER"
+git checkout feature --quiet
+GIT_COMMITTER_DATE="2026-04-10T11:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-10T11:00:00Z" \
+    git merge main --no-ff -m "merge main into feature" --quiet
+MERGE_REV=$(git rev-parse HEAD)
+git checkout main --quiet
+git merge feature --ff-only --quiet
+# After main fast-forwards onto the merge, main-2 leaves main's first-parent
+# chain entirely (the merge's first parent is feature-1), yet the version
+# still strictly increases: cohort = merge + feature-1 + main-2 = 3.
+assert_output "incident topology: after reparenting strictly increases" \
+    "20260410.3" \
+    "$GITCALVER"
+assert_output "incident topology: matches hand-computed cohort" \
+    "20260410.3" \
+    "$GITCALVER" "$MERGE_REV"
+# The sequence is now sparse: no commit's cohort is exactly 2 for this date.
+assert_output "sparse reverse: exact match below the gap" \
+    "$FEATURE1_REV" \
+    "$GITCALVER" 20260410.1
+assert_exit "sparse reverse: gap is not found, not nearest" 1 \
+    "$GITCALVER" 20260410.2
+assert_output "sparse reverse: exact match above the gap" \
+    "$MERGE_REV" \
+    "$GITCALVER" 20260410.3
+
+new_repo "same_date_behind_older_not_counted"
+commit_at "2026-04-10T09:00:00Z" "X same-date root"
+commit_at "2026-04-09T09:00:00Z" "Z older, clock skew"
+commit_at "2026-04-10T09:00:00Z" "N1 same date again"
+commit_at "2026-04-10T10:00:00Z" "Y tip"
+# X shares Y's date but sits behind the older Z, so the pruned walk from Y
+# never reaches it: cohort = Y + N1 = 2, not 3.
+assert_output "same-date commit behind an older-dated commit is not counted" \
+    "20260410.2" \
+    "$GITCALVER"
+
+new_repo "buried_future_date_tolerated"
+commit_at "2026-04-15T09:00:00Z" "A buried future date"
+commit_at "2026-04-10T09:00:00Z" "B older, clock corrected"
+commit_at "2026-04-10T10:00:00Z" "C same date as B"
+commit_at "2026-04-11T09:00:00Z" "D tip"
+# A's future date is buried behind the older-dated B/C, which the pruned walk
+# from D never explores past, so it is tolerated rather than rejected.
+assert_output "buried future date behind an older commit is tolerated" \
+    "20260411.1" \
+    "$GITCALVER"
+
+new_repo "cross_day_merge_not_counted"
+commit_at "2026-04-09T09:00:00Z" "main-1"
+git checkout -b feature --quiet
+commit_at "2026-04-09T10:00:00Z" "feature-1"
+git checkout main --quiet
+commit_at "2026-04-10T09:00:00Z" "main-2"
+GIT_COMMITTER_DATE="2026-04-10T10:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-10T10:00:00Z" \
+    git merge feature --no-ff -m "merge feature" --quiet
+# feature-1 is dated a day before the merge, so it is pruned like any other
+# older-dated parent: cohort = merge + main-2 = 2, not 4.
+assert_output "cross-day merge does not count an older second parent" \
+    "20260410.2" \
+    "$GITCALVER"
+
+new_repo "newer_adjacent_to_cohort_member"
+commit_at "2026-04-09T09:00:00Z" "old base"
+git checkout -b side --quiet
+commit_at "2026-04-11T09:00:00Z" "side, future date"
+git checkout main --quiet
+commit_at "2026-04-10T09:00:00Z" "main-1"
+GIT_COMMITTER_DATE="2026-04-10T10:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-10T10:00:00Z" \
+    git merge side --no-ff -m merge --quiet
+MERGE_REV=$(git rev-parse HEAD)
+# The merge's own cohort walk reaches main-1 (same date), then the merge's
+# second parent (side, a future date directly adjacent to a cohort member):
+# reject, both when the merge is the query target and when a reverse lookup
+# must compute the merge's cohort to search past main-1's.
+assert_exit "newer commit adjacent to a cohort member rejects forward" 1 \
+    "$GITCALVER" "$MERGE_REV"
+assert_output "newer commit adjacent to a cohort member: earlier member is clean" \
+    "$(git rev-parse main~1)" \
+    "$GITCALVER" 20260410.1
+assert_exit "newer commit adjacent to a cohort member rejects reverse" 1 \
+    "$GITCALVER" 20260410.2
+
+new_repo "shallow_second_parent_same_date"
+commit_at "2026-04-08T09:00:00Z" "root, older"
+ROOT_REV=$(git rev-parse HEAD)
+commit_at "2026-04-10T09:00:00Z" "main-1"
+git checkout -b side "$ROOT_REV" --quiet
+commit_at "2026-04-10T09:00:00Z" "side-base, same date"
+commit_at "2026-04-10T09:30:00Z" "side-1"
+git checkout main --quiet
+GIT_COMMITTER_DATE="2026-04-10T10:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-10T10:00:00Z" \
+    git merge side --no-ff -m merge --quiet
+git clone --depth 3 --single-branch --branch main \
+    "file://$TMPDIR_BASE/shallow_second_parent_same_date" \
+    "$TMPDIR_BASE/shallow_second_parent_same_date_clone" --quiet
+cd "$TMPDIR_BASE/shallow_second_parent_same_date_clone"
+# At depth 3, both root (older) and side-base (same date) become shallow
+# boundaries. root is pruned regardless of its shallow status, but side-base
+# is a same-date cohort member reached only through the merge's second
+# parent, so its true root/shallow-cut status must be provable.
+assert_exit "shallow boundary same-day via a second parent is unprovable" 4 \
+    "$GITCALVER"
+# Reverse lookup shares that proof obligation through its per-member cohort
+# scan: 20260410.1 resolves at main-1, whose cohort never needs the shallow
+# cut, while 20260410.2 requires the merge's cohort, which does.
+assert_output "reverse lookup before the unprovable member still resolves" \
+    "$(git rev-parse 'HEAD^')" \
+    "$GITCALVER" 20260410.1
+assert_exit "reverse lookup needing a shallow same-day second parent is unprovable" 4 \
+    "$GITCALVER" 20260410.2
+
+new_repo "shallow_second_parent_older_date"
+commit_at "2026-04-08T09:00:00Z" "root, older"
+ROOT_REV=$(git rev-parse HEAD)
+commit_at "2026-04-10T09:00:00Z" "main-1"
+git checkout -b side "$ROOT_REV" --quiet
+commit_at "2026-04-09T09:00:00Z" "side-base, older date"
+commit_at "2026-04-10T09:30:00Z" "side-1"
+git checkout main --quiet
+GIT_COMMITTER_DATE="2026-04-10T10:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-10T10:00:00Z" \
+    git merge side --no-ff -m merge --quiet
+git clone --depth 3 --single-branch --branch main \
+    "file://$TMPDIR_BASE/shallow_second_parent_older_date" \
+    "$TMPDIR_BASE/shallow_second_parent_older_date_clone" --quiet
+cd "$TMPDIR_BASE/shallow_second_parent_older_date_clone"
+# Both shallow boundaries (root and side-base) are older than the target
+# date this time, so neither needs to be disambiguated at all: cohort =
+# merge + main-1 + side-1 = 3.
+assert_output "older-dated boundary via a second parent needs no proof" \
+    "20260410.3" \
+    "$GITCALVER"
+
+new_repo "whole_history_one_date_root_block"
+commit_at "2026-04-10T09:00:00Z" "c1"
+FIRST_REV=$(git rev-parse HEAD)
+commit_at "2026-04-10T10:00:00Z" "c2"
+commit_at "2026-04-10T11:00:00Z" "c3"
+# The entire local history shares one date and ends at a genuine root; no
+# shallow or partial boundary is involved, forward or reverse.
+assert_output "whole-history one-date root block: forward" "20260410.3" \
+    "$GITCALVER"
+assert_output "whole-history one-date root block: reverse first" \
+    "$FIRST_REV" \
+    "$GITCALVER" 20260410.1
+
+new_repo "d2_d2_d1_d2_regression"
+commit_at "2026-04-10T09:00:00Z" "chain[4], D2"
+commit_at "2026-04-09T09:00:00Z" "chain[3], D1"
+commit_at "2026-04-10T09:30:00Z" "chain[2], D2"
+commit_at "2026-04-10T10:00:00Z" "chain[1], D2 tip"
+# Forward at the tip is unaffected: the pruned walk stops at chain[3] (older)
+# and never visits chain[4], so no anomaly is seen. Reverse for D1 still
+# dies: the first-parent block-delimiter finds chain[3]'s own first-parent
+# neighbor, chain[4], is newer than the D1 block it just closed.
+assert_output "D2 D2 D1 D2: forward at tip succeeds" "20260410.2" \
+    "$GITCALVER"
+assert_exit "D2 D2 D1 D2: reverse for D1 still dies decreasing" 1 \
+    "$GITCALVER" 20260409.1
+
+new_repo "dirty_anchor_uses_cohort_count"
+commit_at "2026-04-10T09:00:00Z" "main-1"
+git checkout -b feature --quiet
+commit_at "2026-04-10T10:00:00Z" "feature-1"
+commit_at "2026-04-10T11:00:00Z" "feature-2"
+commit_at "2026-04-10T12:00:00Z" "feature-3"
+git checkout main --quiet
+GIT_COMMITTER_DATE="2026-04-10T13:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-10T13:00:00Z" \
+    git merge feature --no-ff -m "merge feature" --quiet
+git checkout -b other --quiet
+commit_at "2026-04-10T14:00:00Z" "other-1"
+OTHER_REV=$(git rev-parse HEAD)
+OTHER_SHORT=$(printf '%.7s' "$OTHER_REV")
+git checkout main --quiet
+# The anchor (main's tip) has a merge-inflated cohort of 5; --dirty must
+# report that, not a first-parent-chain count of 2.
+assert_output "dirty anchor reflects the anchor's own cohort count" \
+    "20260410.5-dirty.${OTHER_SHORT}" \
+    "$GITCALVER" --dirty "-dirty" "$OTHER_REV"
 
 # ---- UTC midnight boundary ----
 

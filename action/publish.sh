@@ -28,9 +28,9 @@ valid_date() {
         leap=1
     fi
     case $month in
-        2) max_day=$((28 + leap)) ;;
-        4 | 6 | 9 | 11) max_day=30 ;;
-        *) max_day=31 ;;
+    2) max_day=$((28 + leap)) ;;
+    4 | 6 | 9 | 11) max_day=30 ;;
+    *) max_day=31 ;;
     esac
     ((day <= max_day))
 }
