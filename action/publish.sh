@@ -115,27 +115,43 @@ fetch_tag_target() {
     printf '%s\n' "$target"
 }
 
-first_parent_contains() {
-    local descendant=$1 ancestor=$2 chain commit last stored_parent
+# Require the previous canonical tag's target to remain provably continuous
+# with the publishing commit, per 0.3: reachable through any parent (not just
+# the first-parent chain, since a commit's version no longer depends on its
+# first-parent position) and dated no later than it. Ancestry uses git's own
+# any-parent reachability test rather than a hand-rolled first-parent walk.
+#
+# A negative reachability answer (exit 1) is definitive only when the local
+# history is complete: in a shallow clone the fetched tag target and HEAD can
+# sit on disconnected local islands whose true connection lies beyond a
+# shallow boundary, and merge-base reports the same exit 1 it would for
+# genuinely unrelated history. Any other exit status (e.g. a missing object)
+# is never definitive.
+#
+# This alone does not guarantee the new version is numerically greater than
+# the previous one: version_is_greater already enforces that, and it compares
+# $candidate_count, which is freshly computed for the actual publishing
+# commit by the already-fixed gitcalver.sh. So this check's job is narrower
+# than "guarantee monotonicity" — it confirms the previous tag is not being
+# abandoned on unrelated or rewritten history. Do not read it as the sole
+# monotonicity guarantee and simplify the numeric check away.
+require_tag_continuity() {
+    local target=$1 target_date=$2 head=$3 head_date=$4 status shallow_file
 
-    chain=$(git rev-list --first-parent "$descendant") ||
-        fail "cannot prove the selected branch's first-parent history"
-    last=
-    while IFS= read -r commit; do
-        [[ -n $commit ]] || continue
-        last=$commit
-        if [[ $commit == "$ancestor" ]]; then
-            return 0
-        fi
-    done <<<"$chain"
+    if git merge-base --is-ancestor "$target" "$head" 2>/dev/null; then
+        :
+    else
+        status=$?
+        ((status == 1)) ||
+            fail "local history cannot prove continuity with the previous canonical tag"
+        shallow_file="$(git rev-parse --git-common-dir)/shallow"
+        [[ ! -s $shallow_file ]] ||
+            fail "local history cannot prove continuity with the previous canonical tag (shallow clone; fetch full history)"
+        fail "previous canonical tag target is not reachable from HEAD"
+    fi
 
-    [[ -n $last ]] || fail "cannot read the selected branch's history"
-    stored_parent=$(git cat-file commit "$last" 2>/dev/null |
-        sed -n '/^$/q; s/^parent //p' | sed -n '1p') ||
-        fail "cannot inspect the selected branch's history"
-    [[ -z $stored_parent ]] ||
-        fail "local history cannot prove continuity with the previous canonical tag"
-    return 1
+    [[ $target_date < $head_date || $target_date == "$head_date" ]] ||
+        fail "previous canonical tag target is dated after the publishing commit ($target_date > $head_date)"
 }
 
 : "${VERSION:?VERSION is required}"
@@ -246,9 +262,8 @@ if [[ -n $latest_name ]]; then
         fail "cannot read commit date for canonical tag $latest_name"
     [[ $latest_target_date == "$latest_date" ]] ||
         fail "canonical tag $latest_name does not match its commit date $latest_target_date"
-    if ! first_parent_contains "$head_oid" "$latest_target"; then
-        fail "previous canonical tag $latest_name is not on HEAD's first-parent chain"
-    fi
+    require_tag_continuity "$latest_target" "$latest_target_date" \
+        "$head_oid" "$head_date"
 fi
 
 if git push --atomic "$REMOTE" \

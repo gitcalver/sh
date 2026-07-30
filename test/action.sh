@@ -173,7 +173,7 @@ git -C "$REPO" switch --quiet main
 assert_failure 'unreachable global latest tag blocks reuse' \
     'is not newer than canonical tag' publish 20260410.1 20260410
 
-new_repo merge_orientation
+new_repo second_parent_release_line_accepted
 commit_at 2026-04-08 base
 git -C "$REPO" switch --quiet -c feature
 commit_at 2026-04-09 feature
@@ -185,8 +185,47 @@ GIT_AUTHOR_DATE='2026-04-10T12:00:00Z' \
     GIT_COMMITTER_DATE='2026-04-10T12:00:00Z' \
     git -C "$REPO" merge --quiet --no-ff feature -m merge
 push_branch
-assert_failure 'second-parent release line is rejected' \
-    "not on HEAD's first-parent chain" publish 20260410.1 20260410
+# Under 0.3, continuity is any-parent reachability plus a not-later date, not
+# first-parent membership: the previous tag's target is the merge's second
+# parent, dated before the merge, so publication is accepted.
+assert_success 'second-parent release line is accepted when not later-dated' \
+    publish 20260410.1 20260410
+
+new_repo tag_target_unreachable
+commit_at 2026-04-09 base
+git -C "$REPO" switch --quiet --orphan abandoned
+commit_at 2026-04-09 abandoned-tag-target
+abandoned=$(git -C "$REPO" rev-parse HEAD)
+push_tag 20260409.1 "$abandoned"
+git -C "$REPO" switch --quiet main
+commit_at 2026-04-10 main-1
+push_branch
+assert_failure 'previous tag target on unrelated history is rejected' \
+    'previous canonical tag target is not reachable from HEAD' \
+    publish 20260410.1 20260410
+
+new_repo incident_topology_publish
+commit_at 2026-04-09 base
+git -C "$REPO" switch --quiet -c feature
+commit_at 2026-04-10 feature-1
+git -C "$REPO" switch --quiet main
+commit_at 2026-04-10 main-2
+push_branch
+assert_success 'publish before reparenting' publish 20260410.1 20260410
+# Reproduce the incident: merge main into feature, then fast-forward main
+# onto the merge. main-2 leaves main's first-parent chain (the merge's first
+# parent is feature-1) but remains reachable through the merge's second
+# parent, at the same date, so the next publish succeeds at the higher
+# cohort-based version instead of being permanently blocked.
+git -C "$REPO" switch --quiet feature
+GIT_AUTHOR_DATE='2026-04-10T13:00:00Z' \
+    GIT_COMMITTER_DATE='2026-04-10T13:00:00Z' \
+    git -C "$REPO" merge --quiet --no-ff main -m "merge main into feature"
+git -C "$REPO" switch --quiet main
+git -C "$REPO" merge --quiet --ff-only feature
+push_branch
+assert_success 'publish after reparenting succeeds at the higher cohort version' \
+    publish 20260410.3 20260410
 
 new_repo first_parent_merge
 commit_at 2026-04-08 base
@@ -202,6 +241,47 @@ GIT_AUTHOR_DATE='2026-04-10T12:00:00Z' \
 push_branch
 assert_success 'first-parent release line survives a merge' \
     publish 20260410.1 20260410
+
+new_repo shallow_continuity_unprovable
+commit_at 2026-04-01 c1
+commit_at 2026-04-01 c2
+commit_at 2026-04-01 c3
+tag_target=$(git -C "$REPO" rev-parse HEAD)
+commit_at 2026-04-02 c4
+commit_at 2026-04-03 c5
+commit_at 2026-04-09 c6
+commit_at 2026-04-10 c7
+push_branch
+push_tag 20260401.1 "$tag_target"
+# A shallow work clone leaves the fetched tag target and HEAD on disconnected
+# local islands even though full history connects them: the tag fetch brings
+# the target's own complete closure but not the intervening commits beyond
+# the shallow boundary, so a negative reachability answer is not definitive
+# and must surface as unprovable, not as a permanent continuity failure.
+rm -rf "$REPO"
+git clone --quiet --depth 2 --single-branch --branch main \
+    "file://$REMOTE_REPO" "$REPO"
+git -C "$REPO" remote rename origin upstream
+git -C "$REPO" config user.email test@example.com
+git -C "$REPO" config user.name 'GitCalVer Test'
+assert_failure 'shallow clone cannot prove tag continuity' \
+    'local history cannot prove continuity' publish 20260410.1 20260410
+
+new_repo continuity_missing_object
+commit_at 2026-04-01 old
+tag_target=$(git -C "$REPO" rev-parse HEAD)
+commit_at 2026-04-05 middle
+middle=$(git -C "$REPO" rev-parse HEAD)
+commit_at 2026-04-06 later
+commit_at 2026-04-10 tip
+push_branch
+push_tag 20260401.1 "$tag_target"
+# A missing intermediate object (deep enough that reading HEAD itself still
+# works) makes the ancestry walk fail outright — neither yes nor no — which
+# must surface as unprovable.
+rm "$REPO/.git/objects/${middle:0:2}/${middle:2}"
+assert_failure 'missing object cannot prove tag continuity' \
+    'local history cannot prove continuity' publish 20260410.1 20260410
 
 printf '%s passed, %s failed\n' "$passed" "$failed"
 ((failed == 0))
