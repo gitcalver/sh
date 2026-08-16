@@ -354,10 +354,9 @@ find_reachable_branch_anchor() (
 # newer-dated commit buried behind an older-dated commit is never reached
 # either, so it is tolerated rather than rejected. Visiting REV's own parents
 # first (REV is trivially a member of its own cohort) means this same walk
-# also performs the "committer dates go backwards" check that a first-parent-
-# only chain walk would need separately, generalized to every parent instead
-# of only the first. Prints "DATE COUNT". Defined ahead of reverse lookup,
-# which also calls it once per date-block member.
+# also performs the "committer dates go backwards" check, across every
+# parent rather than just one chain. Prints "DATE COUNT". Defined ahead of
+# reverse lookup, which also calls it once per date-block member.
 compute_version_fields() (
     # rev is always a full object ID -- forward resolution, anchor lookup,
     # and reverse's block members all pass resolved hashes -- so it can
@@ -433,8 +432,7 @@ EOF
         count=$b
         # Every cohort member that appeared parentless in the dump must be a
         # genuine root, not a shallow or partial-clone cut hiding a same-date
-        # ancestor, exactly as a first-parent-only walk already had to prove
-        # at its single boundary.
+        # ancestor.
         plist=$(printf '%s\n' "$result" | sed '1d')
         while IFS= read -r node; do
             [ -n "$node" ] || continue
@@ -521,12 +519,12 @@ find_version_commit() (
     branch_tip="$3"
 
     # Stream one first-parent log through awk to delimit the target date's
-    # block on the selected branch and prove its older boundary, exactly as
-    # 0.2 did. This no longer determines N by itself: under cohort counting, a
-    # block member's N can include commits reachable only through a second
-    # parent, so N is not a function of position within this first-parent
-    # block. It emits the full block instead (newest to oldest, matching the
-    # order commits are encountered), for the per-member scan below.
+    # block on the selected branch and prove its older boundary. This does
+    # not determine N by itself: a block member's N can include commits
+    # reachable only through a second parent, so N is not a function of
+    # position within this first-parent block. It emits the full block
+    # instead (newest to oldest, matching the order commits are
+    # encountered), for the per-member scan below.
     result=$(TZ=UTC git log "$branch_tip" --first-parent \
         --format='%H%x09%cd' --date=format-local:'%Y%m%d' 2>/dev/null |
         awk -F '\t' -v td="$target_date" '

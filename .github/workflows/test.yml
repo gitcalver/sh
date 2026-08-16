@@ -6,7 +6,8 @@ on: [push, pull_request]
 
 jobs:
   test-script:
-    # Newest and oldest non-EOL version of each Unix OS with a GitHub Actions runner.
+    # Newest and oldest non-EOL version of each Unix OS with a
+    # GitHub Actions runner.
     strategy:
       matrix:
         os:

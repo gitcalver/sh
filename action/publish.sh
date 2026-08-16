@@ -116,10 +116,11 @@ fetch_tag_target() {
 }
 
 # Require the previous canonical tag's target to remain provably continuous
-# with the publishing commit, per 0.3: reachable through any parent (not just
-# the first-parent chain, since a commit's version no longer depends on its
-# first-parent position) and dated no later than it. Ancestry uses git's own
-# any-parent reachability test rather than a hand-rolled first-parent walk.
+# with the publishing commit: reachable through any parent and dated no later
+# than it. A commit's version count depends on its date cohort, which is
+# reached through any parent rather than only the first-parent chain, so
+# ancestry here also uses git's own any-parent reachability test rather than
+# a hand-rolled first-parent walk.
 #
 # A negative reachability answer (exit 1) is definitive only when the local
 # history is complete: in a shallow clone the fetched tag target and HEAD can

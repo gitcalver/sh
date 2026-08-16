@@ -548,9 +548,9 @@ git checkout main --quiet
 GIT_COMMITTER_DATE="2026-04-10T13:00:00Z" \
     GIT_AUTHOR_DATE="2026-04-10T13:00:00Z" \
     git merge feature --no-ff -m "merge feature" --quiet
-# N is the date cohort, not first-parent position: main-1 + merge commit +
-# feature-1, feature-2, feature-3 (all same UTC date, reachable through the
-# merge's second parent) = 5.
+# N counts the date cohort reachable through any parent: main-1, the merge
+# commit, and feature-1, feature-2, feature-3 (all same UTC date, reachable
+# through the merge's second parent) = 5.
 assert_output "merge counts same-date commits reachable through any parent" \
     "20260410.5" \
     "$GITCALVER"
@@ -1287,7 +1287,7 @@ commit_at "2026-04-10T09:00:00Z"
 assert_exit "--help exits 0" 0 \
     "$GITCALVER" --help
 # Accept either the unstamped "(development)" build or a release-stamped
-# "gitcalver YYYYMMDD.N", so this also holds when run against a release artifact.
+# "gitcalver YYYYMMDD.N", so this also holds against a release artifact.
 assert_match "--version reports a build" \
     '^gitcalver (\(development\)|[0-9]{8}\.[1-9][0-9]*)$' \
     "$GITCALVER" --version

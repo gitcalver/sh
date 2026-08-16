@@ -185,7 +185,7 @@ GIT_AUTHOR_DATE='2026-04-10T12:00:00Z' \
     GIT_COMMITTER_DATE='2026-04-10T12:00:00Z' \
     git -C "$REPO" merge --quiet --no-ff feature -m merge
 push_branch
-# Under 0.3, continuity is any-parent reachability plus a not-later date, not
+# Continuity requires any-parent reachability plus a not-later date, not
 # first-parent membership: the previous tag's target is the merge's second
 # parent, dated before the merge, so publication is accepted.
 assert_success 'second-parent release line is accepted when not later-dated' \
