@@ -178,13 +178,10 @@ export GIT_NO_LAZY_FETCH GIT_NO_REPLACE_OBJECTS
 
 # --- Verify git repository ---
 
-git rev-parse --git-dir >/dev/null 2>&1 ||
-    die "not a git repository"
-
 # Resolve repository metadata through the common directory so linked worktrees
 # see the same shallow boundary and deprecated graft file as the main worktree.
-GIT_COMMON_DIR=$(git rev-parse --git-common-dir) ||
-    die "cannot resolve git common directory"
+GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null) ||
+    die "not a git repository"
 case "$GIT_COMMON_DIR" in
 /*) ;;
 *)
@@ -209,13 +206,13 @@ git cat-file -e "$HEAD_OID^{commit}" 2>/dev/null ||
     die "HEAD commit is missing from local history" \
         "$EXIT_INCOMPLETE_HISTORY"
 
-IS_BARE_REPOSITORY=$(git rev-parse --is-bare-repository)
-
 # --- Determine and verify default branch ---
 
 # These helpers run in ( ) subshells, not { } blocks, so scratch variables stay
 # function-local without the non-POSIX `local` keyword; each communicates only
 # through stdout and its exit status.
+
+# Keep in lockstep with detect_branch in action/publish.sh.
 detect_default_branch() (
     # 1. Explicit override
     if [ -n "$BRANCH_OVERRIDE" ]; then
@@ -237,25 +234,15 @@ detect_default_branch() (
         esac
     fi
 
-    # 3. Check the selected remote's main, then master
-    if git rev-parse --verify "refs/remotes/$REMOTE/main" >/dev/null 2>&1; then
-        echo "main"
-        exit 0
-    fi
-    if git rev-parse --verify "refs/remotes/$REMOTE/master" >/dev/null 2>&1; then
-        echo "master"
-        exit 0
-    fi
-
-    # 4. Check local main, then master
-    if git rev-parse --verify refs/heads/main >/dev/null 2>&1; then
-        echo "main"
-        exit 0
-    fi
-    if git rev-parse --verify refs/heads/master >/dev/null 2>&1; then
-        echo "master"
-        exit 0
-    fi
+    # 3. Check the selected remote's main and master, then local main and
+    # master
+    for candidate in "refs/remotes/$REMOTE/main" "refs/remotes/$REMOTE/master" \
+        refs/heads/main refs/heads/master; do
+        if git rev-parse --verify "$candidate" >/dev/null 2>&1; then
+            printf '%s\n' "${candidate##*/}"
+            exit 0
+        fi
+    done
 
     exit 1
 )
@@ -272,14 +259,16 @@ resolve_branch_tip() (
         git rev-parse --verify "refs/remotes/$REMOTE/$branch" 2>/dev/null
 )
 
-# Read the actual first parent for one locally available commit. This is used
-# only to distinguish a real root from a shallow or missing-parent boundary
-# after a bulk Git traversal has stopped; it is never called once per commit.
-get_stored_first_parent() {
-    commit_object=$(git cat-file commit "$1" 2>/dev/null) || return 1
-    STORED_FIRST_PARENT=$(printf '%s\n' "$commit_object" |
-        sed -n '/^$/q; s/^parent //p' | sed -n '1p')
-}
+# A commit that a bulk Git traversal treated as parentless is a genuine root
+# only if its stored object is present locally and lists no parent; a missing
+# object or a stored parent means the traversal stopped at a shallow or
+# partial-clone cut instead. Used only after a traversal has stopped; never
+# called once per commit.
+is_genuine_root() (
+    commit_object=$(git cat-file commit "$1" 2>/dev/null) || exit 1
+    printf '%s\n' "$commit_object" |
+        awk '/^$/ { exit 0 } $1 == "parent" { exit 1 }'
+)
 
 # A negative reachability result is conclusive only when the target's known
 # ancestry did not stop at a shallow boundary and did not encounter a missing
@@ -291,9 +280,7 @@ history_is_complete() (
     while IFS= read -r boundary; do
         [ -n "$boundary" ] || continue
         if git merge-base --is-ancestor "$boundary" "$1" 2>/dev/null; then
-            get_stored_first_parent "$boundary" ||
-                exit "$EXIT_INCOMPLETE_HISTORY"
-            [ -z "$STORED_FIRST_PARENT" ] ||
+            is_genuine_root "$boundary" ||
                 exit "$EXIT_INCOMPLETE_HISTORY"
         else
             ancestor_status=$?
@@ -334,9 +321,7 @@ find_reachable_branch_anchor() (
     last_unreachable=$(git rev-parse --verify \
         "$branch_tip~$last_index^{commit}" 2>/dev/null) ||
         exit "$EXIT_INCOMPLETE_HISTORY"
-    get_stored_first_parent "$last_unreachable" ||
-        exit "$EXIT_INCOMPLETE_HISTORY"
-    [ -z "$STORED_FIRST_PARENT" ] || exit "$EXIT_INCOMPLETE_HISTORY"
+    is_genuine_root "$last_unreachable" || exit "$EXIT_INCOMPLETE_HISTORY"
 
     # The selected walk reached a real root. The histories are conclusively
     # unrelated only if the target walk is complete as well.
@@ -436,10 +421,7 @@ EOF
         plist=$(printf '%s\n' "$result" | sed '1d')
         while IFS= read -r node; do
             [ -n "$node" ] || continue
-            get_stored_first_parent "$node" ||
-                die "local history cannot prove the target's date cohort" \
-                    "$EXIT_INCOMPLETE_HISTORY"
-            [ -z "$STORED_FIRST_PARENT" ] ||
+            is_genuine_root "$node" ||
                 die "local history cannot prove the target's date cohort" \
                     "$EXIT_INCOMPLETE_HISTORY"
         done <<EOF
@@ -481,7 +463,8 @@ parse_gitcalver_version() {
 # Validate the YYYYMMDD segment as a Gregorian calendar date. Keeping this
 # separate from the shape parser makes version-shaped inputs take reverse-mode
 # precedence even when their date is invalid; they fail as versions rather
-# than falling through to revision parsing.
+# than falling through to revision parsing. Keep in lockstep with valid_date
+# in action/publish.sh.
 valid_gitcalver_date() {
     printf '%s\n' "$1" | awk '
         {
@@ -575,10 +558,7 @@ EOF
         die "committer dates go backwards (found $value after $detail in history)"
         ;;
     boundary)
-        get_stored_first_parent "$value" ||
-            die "local history ended before version could be proved" \
-                "$EXIT_INCOMPLETE_HISTORY"
-        [ -z "$STORED_FIRST_PARENT" ] ||
+        is_genuine_root "$value" ||
             die "local history ended before version could be proved" \
                 "$EXIT_INCOMPLETE_HISTORY"
         ;;
@@ -696,17 +676,14 @@ fi
 # --- Check dirty workspace (only for HEAD) ---
 
 IS_DIRTY=false
-if ! $TARGET_SET; then
-    if $OFF_BRANCH; then
-        IS_DIRTY=true
-    elif [ "$IS_BARE_REPOSITORY" = "false" ]; then
-        WORKTREE_STATUS=$(git status --porcelain 2>/dev/null) ||
-            die "local history cannot prove workspace state" \
-                "$EXIT_INCOMPLETE_HISTORY"
-        [ -z "$WORKTREE_STATUS" ] || IS_DIRTY=true
-    fi
-elif $OFF_BRANCH; then
+if $OFF_BRANCH; then
     IS_DIRTY=true
+elif ! $TARGET_SET &&
+    [ "$(git rev-parse --is-bare-repository)" = "false" ]; then
+    WORKTREE_STATUS=$(git status --porcelain 2>/dev/null) ||
+        die "local history cannot prove workspace state" \
+            "$EXIT_INCOMPLETE_HISTORY"
+    [ -z "$WORKTREE_STATUS" ] || IS_DIRTY=true
 fi
 
 if $IS_DIRTY && { $NO_DIRTY || ! $DIRTY_SET; }; then

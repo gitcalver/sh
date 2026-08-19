@@ -3,12 +3,6 @@
 
 SH_FILES := gitcalver.sh action/publish.sh test/test.sh test/action.sh test/install-git.sh
 
-LINUX_SERVICES := debian-12 debian-13 \
-	ubuntu-22.04 ubuntu-25.10 \
-	alpine-3.21 alpine-3.23 \
-	fedora-42 fedora-43 \
-	amazon-linux-2 amazon-linux-2023
-
 .PHONY: build test test-local test-docker lint fmt
 
 build:
@@ -20,7 +14,7 @@ test-local:
 	./test/action.sh
 
 test-docker:
-	docker compose -f test/docker-compose.yml up --build --abort-on-container-failure $(LINUX_SERVICES)
+	docker compose -f test/docker-compose.yml up --build --abort-on-container-failure
 
 lint:
 	shellcheck $(SH_FILES)

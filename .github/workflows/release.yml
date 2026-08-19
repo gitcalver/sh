@@ -59,16 +59,14 @@ jobs:
           }
 
           verify_published() {
-            local state asset_names verify_dir
-            state=$(gh release view "$TAG" \
-              --json isDraft,name \
-              --jq '[.isDraft, .name] | @tsv')
+            local release state asset_names verify_dir
+            release=$(gh release view "$TAG" --json isDraft,name,assets)
+            state=$(jq -r '[.isDraft, .name] | @tsv' <<<"$release")
             [[ "$state" == $'false\t'"$VERSION" ]] || {
               echo "Release $TAG is not the expected published release: $state" >&2
               return 1
             }
-            asset_names=$(gh release view "$TAG" --json assets \
-              --jq '.assets[].name')
+            asset_names=$(jq -r '.assets[].name' <<<"$release")
             [[ "$asset_names" == gitcalver.sh ]] || {
               echo "Release $TAG has unexpected assets: $asset_names" >&2
               return 1

@@ -14,6 +14,7 @@ notice() {
     printf '::notice::gitcalver: %s\n' "$1"
 }
 
+# Keep in lockstep with valid_gitcalver_date in gitcalver.sh.
 valid_date() {
     local value=$1 year month day leap max_day
 
@@ -35,6 +36,17 @@ valid_date() {
     ((day <= max_day))
 }
 
+# Match a DATE.COUNT version core, setting core_date and core_count.
+parse_version_core() {
+    [[ $1 =~ ^([0-9]{8})\.([1-9][0-9]*)$ ]] || return 1
+    core_date=${BASH_REMATCH[1]}
+    core_count=${BASH_REMATCH[2]}
+}
+
+commit_utc_date() {
+    TZ=UTC git show -s --format=%cd --date=format-local:%Y%m%d "$1"
+}
+
 version_is_greater() {
     local left_date=$1 left_count=$2 right_date=$3 right_count=$4
 
@@ -49,8 +61,9 @@ version_is_greater() {
     [[ $left_count > $right_count ]]
 }
 
+# Keep in lockstep with detect_default_branch in gitcalver.sh.
 detect_branch() {
-    local remote_prefix ref
+    local remote_prefix ref candidate
 
     if [[ -n $BRANCH_OVERRIDE ]]; then
         printf '%s\n' "$BRANCH_OVERRIDE"
@@ -63,22 +76,13 @@ detect_branch() {
         printf '%s\n' "${ref#"$remote_prefix"}"
         return
     fi
-    if git rev-parse --verify "refs/remotes/$REMOTE/main" >/dev/null 2>&1; then
-        printf 'main\n'
-        return
-    fi
-    if git rev-parse --verify "refs/remotes/$REMOTE/master" >/dev/null 2>&1; then
-        printf 'master\n'
-        return
-    fi
-    if git rev-parse --verify refs/heads/main >/dev/null 2>&1; then
-        printf 'main\n'
-        return
-    fi
-    if git rev-parse --verify refs/heads/master >/dev/null 2>&1; then
-        printf 'master\n'
-        return
-    fi
+    for candidate in "refs/remotes/$REMOTE/main" "refs/remotes/$REMOTE/master" \
+        refs/heads/main refs/heads/master; do
+        if git rev-parse --verify "$candidate" >/dev/null 2>&1; then
+            printf '%s\n' "${candidate##*/}"
+            return
+        fi
+    done
     return 1
 }
 
@@ -172,12 +176,10 @@ git remote get-url "$REMOTE" >/dev/null 2>&1 ||
 if [[ $VERSION != "$VERSION_PREFIX"* ]]; then
     fail "version $VERSION does not start with prefix $VERSION_PREFIX"
 fi
-candidate_core=${VERSION#"$VERSION_PREFIX"}
-if [[ ! $candidate_core =~ ^([0-9]{8})\.([1-9][0-9]*)$ ]]; then
+parse_version_core "${VERSION#"$VERSION_PREFIX"}" ||
     fail "version is not a clean GitCalVer version: $VERSION"
-fi
-candidate_date=${BASH_REMATCH[1]}
-candidate_count=${BASH_REMATCH[2]}
+candidate_date=$core_date
+candidate_count=$core_count
 valid_date "$candidate_date" || fail "version has an invalid date: $VERSION"
 [[ $VERSION_DATE == "$candidate_date" ]] ||
     fail "version date output does not match version: $VERSION"
@@ -194,8 +196,7 @@ git check-ref-format "refs/remotes/$REMOTE/$BRANCH" >/dev/null 2>&1 ||
 
 export GIT_NO_LAZY_FETCH=1 GIT_NO_REPLACE_OBJECTS=1
 head_oid=$(git rev-parse --verify 'HEAD^{commit}') || fail "HEAD is not a commit"
-head_date=$(TZ=UTC git show -s --format=%cd \
-    --date=format-local:%Y%m%d "$head_oid") || fail "cannot read HEAD date"
+head_date=$(commit_utc_date "$head_oid") || fail "cannot read HEAD date"
 [[ $head_date == "$candidate_date" ]] ||
     fail "version date $candidate_date does not match HEAD date $head_date"
 
@@ -219,21 +220,19 @@ while IFS=$'\t' read -r oid ref; do
     [[ $ref == refs/tags/* ]] || continue
     name=${ref#refs/tags/}
     [[ $name == "$tag_stem"* ]] || continue
-    core=${name#"$tag_stem"}
-    [[ $core =~ ^([0-9]{8})\.([1-9][0-9]*)$ ]] || continue
-    date=${BASH_REMATCH[1]}
-    count=${BASH_REMATCH[2]}
-    valid_date "$date" ||
+    parse_version_core "${name#"$tag_stem"}" || continue
+    valid_date "$core_date" ||
         fail "canonical tag has an invalid date: $name"
 
     if [[ $name == "$TAG" ]]; then
         candidate_oid=$oid
     fi
     if [[ -z $latest_name ]] ||
-        version_is_greater "$date" "$count" "$latest_date" "$latest_count"; then
+        version_is_greater "$core_date" "$core_count" \
+            "$latest_date" "$latest_count"; then
         latest_name=$name
-        latest_date=$date
-        latest_count=$count
+        latest_date=$core_date
+        latest_count=$core_count
         latest_oid=$oid
     fi
 done <<<"$remote_tags"
@@ -258,8 +257,7 @@ fi
 
 if [[ -n $latest_name ]]; then
     latest_target=$(fetch_tag_target "$latest_name" "$latest_oid")
-    latest_target_date=$(TZ=UTC git show -s --format=%cd \
-        --date=format-local:%Y%m%d "$latest_target") ||
+    latest_target_date=$(commit_utc_date "$latest_target") ||
         fail "cannot read commit date for canonical tag $latest_name"
     [[ $latest_target_date == "$latest_date" ]] ||
         fail "canonical tag $latest_name does not match its commit date $latest_target_date"

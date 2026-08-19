@@ -77,10 +77,19 @@ runs:
         INPUT_REMOTE: ${{ inputs.remote }}
         INPUT_TAG_PREFIX: ${{ inputs.tag-prefix }}
       run: |
-        args=()
+        # Flags shared by the compute invocation and the dirty probe below.
+        common=()
         if [[ -n "$INPUT_PREFIX" ]]; then
-          args+=(--prefix "$INPUT_PREFIX")
+          common+=(--prefix "$INPUT_PREFIX")
         fi
+        if [[ -n "$INPUT_BRANCH" ]]; then
+          common+=(--branch "$INPUT_BRANCH")
+        fi
+        if [[ -n "$INPUT_REMOTE" ]]; then
+          common+=(--remote "$INPUT_REMOTE")
+        fi
+
+        args=("${common[@]}")
         if [[ -n "$INPUT_DIRTY" ]]; then
           args+=(--dirty "$INPUT_DIRTY")
         fi
@@ -88,12 +97,6 @@ runs:
         # its own), so gate it on a non-empty dirty string.
         if [[ "$INPUT_DIRTY_HASH" != "true" && -n "$INPUT_DIRTY" ]]; then
           args+=(--no-dirty-hash)
-        fi
-        if [[ -n "$INPUT_BRANCH" ]]; then
-          args+=(--branch "$INPUT_BRANCH")
-        fi
-        if [[ -n "$INPUT_REMOTE" ]]; then
-          args+=(--remote "$INPUT_REMOTE")
         fi
 
         version=$("${GITHUB_ACTION_PATH}/gitcalver.sh" "${args[@]}")
@@ -106,17 +109,7 @@ runs:
         # where a digit-leading dirty string is indistinguishable from the
         # count. --no-dirty makes the script exit nonzero exactly when the
         # version would be dirty, reusing its own definition of "dirty".
-        probe=()
-        if [[ -n "$INPUT_PREFIX" ]]; then
-          probe+=(--prefix "$INPUT_PREFIX")
-        fi
-        if [[ -n "$INPUT_BRANCH" ]]; then
-          probe+=(--branch "$INPUT_BRANCH")
-        fi
-        if [[ -n "$INPUT_REMOTE" ]]; then
-          probe+=(--remote "$INPUT_REMOTE")
-        fi
-        if "${GITHUB_ACTION_PATH}/gitcalver.sh" --no-dirty "${probe[@]}" >/dev/null 2>&1; then
+        if "${GITHUB_ACTION_PATH}/gitcalver.sh" --no-dirty "${common[@]}" >/dev/null 2>&1; then
           dirty=false
         else
           dirty=true
