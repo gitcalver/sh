@@ -516,6 +516,38 @@ printf '%s\n' "$(git rev-parse HEAD)" >"$GRAFT_PATH"
 assert_exit "legacy graft file returns incomplete history" 4 \
     "$GITCALVER"
 
+# Header continuation lines (gpgsig, mergetag, any multi-line header) begin
+# with one space. One whose own text is the word "parent" is signature or
+# message content, not a parent header, so a genuine root carrying it must
+# still prove as a root at every call site: the target's own cohort, the
+# reverse lookup's oldest first-parent boundary, and the branch anchor
+# search's exhausted selected walk.
+new_repo "root_with_parent_continuation_line"
+EMPTY_TREE=$(git hash-object -w -t tree /dev/null)
+CONTINUATION_ROOT=$(
+    git hash-object -w -t commit --stdin <<EOF
+tree $EMPTY_TREE
+author Test <test@test.com> 1775811600 +0000
+committer Test <test@test.com> 1775811600 +0000
+gpgsig -----BEGIN SSH SIGNATURE-----
+ parent
+ -----END SSH SIGNATURE-----
+
+signed root
+EOF
+)
+git update-ref refs/heads/main "$CONTINUATION_ROOT"
+assert_output "parent-like header continuation: root is genuine (forward)" \
+    "20260410.1" \
+    "$GITCALVER"
+assert_output "parent-like header continuation: root is genuine (reverse)" \
+    "$CONTINUATION_ROOT" \
+    "$GITCALVER" 20260410.1
+git checkout --orphan other --quiet
+commit_at "2026-04-10T10:00:00Z" "orphan"
+assert_exit "parent-like header continuation: unrelated history is conclusive" 3 \
+    "$GITCALVER" --branch main
+
 # ---- --short in forward mode ----
 
 new_repo "short_forward"
@@ -1225,6 +1257,35 @@ assert_output "bare repository explicit revision" "20260410.1" \
     "$GITCALVER" "$FIRST_HASH"
 assert_output "bare repository reverse full object ID" "$HEAD_HASH" \
     "$GITCALVER" 20260410.2
+
+# ---- Failed workspace query ----
+
+# The omitted-target workspace check must never be skipped silently. When the
+# bare-repository query itself fails, an implementation that relies on it must
+# report the failure (1) rather than treat a working tree it never examined as
+# clean; one that does not consult it still sees the untracked file (2).
+new_repo "bare_query_failure"
+commit_at "2026-04-10T09:00:00Z"
+echo "new" >untracked.txt
+FAILING_GIT_BIN="$TMPDIR_BASE/failing-git-bin"
+mkdir -p "$FAILING_GIT_BIN"
+# The shim is first on PATH; dropping that entry finds the real git behind it.
+cat >"$FAILING_GIT_BIN/git" <<'EOF'
+#!/bin/sh
+[ "$1 $2" != "rev-parse --is-bare-repository" ] || exit 1
+PATH=${PATH#*:}
+exec git "$@"
+EOF
+chmod +x "$FAILING_GIT_BIN/git"
+set +e
+env PATH="$FAILING_GIT_BIN:$PATH" "$GITCALVER" >/dev/null 2>&1
+FAILING_GIT_STATUS=$?
+set -e
+case "$FAILING_GIT_STATUS" in
+1 | 2) pass "failed bare-repository query never reports a dirty workspace clean" ;;
+*) fail "failed bare-repository query never reports a dirty workspace clean" \
+    "exit 1 or 2" "exit $FAILING_GIT_STATUS" ;;
+esac
 
 # ---- Exact version parsing precedence ----
 

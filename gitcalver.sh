@@ -266,8 +266,13 @@ resolve_branch_tip() (
 # called once per commit.
 is_genuine_root() (
     commit_object=$(git cat-file commit "$1" 2>/dev/null) || exit 1
+    # Anchor to the start of the line: header continuation lines (gpgsig,
+    # mergetag) begin with a single space that awk's default field splitting
+    # strips, so an unanchored $1 == "parent" would take a continuation line
+    # whose text starts with that word for a real parent header and
+    # misclassify a genuine root as incomplete history.
     printf '%s\n' "$commit_object" |
-        awk '/^$/ { exit 0 } $1 == "parent" { exit 1 }'
+        awk '/^$/ { exit 0 } /^parent / { exit 1 }'
 )
 
 # A negative reachability result is conclusive only when the target's known
@@ -678,12 +683,19 @@ fi
 IS_DIRTY=false
 if $OFF_BRANCH; then
     IS_DIRTY=true
-elif ! $TARGET_SET &&
-    [ "$(git rev-parse --is-bare-repository)" = "false" ]; then
-    WORKTREE_STATUS=$(git status --porcelain 2>/dev/null) ||
-        die "local history cannot prove workspace state" \
-            "$EXIT_INCOMPLETE_HISTORY"
-    [ -z "$WORKTREE_STATUS" ] || IS_DIRTY=true
+elif ! $TARGET_SET; then
+    # A plain command substitution used only as a test's operand is never
+    # checked by `set -e`; capture it as its own statement first so a failure
+    # here dies instead of silently reading as an empty, non-bare-matching
+    # string and skipping the workspace check below.
+    IS_BARE_REPOSITORY=$(git rev-parse --is-bare-repository) ||
+        die "cannot determine whether repository is bare"
+    if [ "$IS_BARE_REPOSITORY" = "false" ]; then
+        WORKTREE_STATUS=$(git status --porcelain 2>/dev/null) ||
+            die "local history cannot prove workspace state" \
+                "$EXIT_INCOMPLETE_HISTORY"
+        [ -z "$WORKTREE_STATUS" ] || IS_DIRTY=true
+    fi
 fi
 
 if $IS_DIRTY && { $NO_DIRTY || ! $DIRTY_SET; }; then
