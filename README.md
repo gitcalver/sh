@@ -48,6 +48,18 @@ When no target is supplied, gitcalver also checks the workspace for uncommitted
 changes. An explicit revision—including `HEAD`—describes only that commit and
 ignores workspace state. Bare repositories are supported.
 
+| Option              | Description                                    |
+|---------------------|------------------------------------------------|
+| `--prefix PREFIX`   | Literal string prepended to version            |
+| `--dirty STRING`    | Enable dirty versions; append STRING.HASH      |
+| `--no-dirty`        | Refuse dirty versions (overrides `--dirty`)    |
+| `--no-dirty-hash`   | Suppress .HASH suffix (requires `--dirty`)     |
+| `--branch BRANCH`   | Base branch name (e.g. `main`); overrides auto-detection. This is the branch versions are minted on, not the branch you are working on. |
+| `--remote REMOTE`   | Remote used for cached branch detection (default: `origin`); never fetches |
+| `--short`           | Output first seven object-ID characters in reverse mode |
+| `--version`         | Show version information                       |
+| `--help`            | Show help                                      |
+
 ### Version prefix
 
 Use `--prefix` to prepend a single-line literal string to the version number,
@@ -114,19 +126,9 @@ Missing trees and blobs do not affect calculation. Replacement refs are
 ignored, and repositories with a legacy `info/grafts` file are rejected because
 those mechanisms rewrite commit ancestry.
 
-### Options
+### SHA-256
 
-| Option              | Description                                    |
-|---------------------|------------------------------------------------|
-| `--prefix PREFIX`   | Literal string prepended to version            |
-| `--dirty STRING`    | Enable dirty versions; append STRING.HASH      |
-| `--no-dirty`        | Refuse dirty versions (overrides `--dirty`)    |
-| `--no-dirty-hash`   | Suppress .HASH suffix (requires `--dirty`)     |
-| `--branch BRANCH`   | Base branch name (e.g. `main`); overrides auto-detection. This is the branch versions are minted on, not the branch you are working on. |
-| `--remote REMOTE`   | Remote used for cached branch detection (default: `origin`); never fetches |
-| `--short`           | Output first seven object-ID characters in reverse mode |
-| `--version`         | Show version information                       |
-| `--help`            | Show help                                      |
+SHA-256 repositories are fully supported.
 
 ## GitHub Actions
 
