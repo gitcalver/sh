@@ -134,6 +134,18 @@ else
     fail_test 'mismatched tag is not moved' 'remote tag was changed'
 fi
 
+new_repo dirty_version
+commit_at 2026-04-10 first
+push_branch
+assert_failure 'dirty version is refused' \
+    'refusing to tag dirty version' \
+    publish 20260410.1-dirty.abc1234 20260410 '' '' true
+if [[ -z $(git --git-dir="$REMOTE_REPO" tag --list) ]]; then
+    pass 'refused dirty version publishes no tag'
+else
+    fail_test 'refused dirty version publishes no tag' 'remote has a tag'
+fi
+
 new_repo stale_tip
 commit_at 2026-04-09 first
 push_branch

@@ -29,17 +29,24 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - run: make test-docker
 
-  # Uses branch override so tests pass on non-default branches.
   test-action:
     runs-on: ubuntu-24.04
+    env:
+      # The run id keeps the name from being a ref-path prefix of a pushed
+      # branch such as gitcalver-test/x, which would break `checkout -B`.
+      TEST_BRANCH: gitcalver-test-${{ github.run_id }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
+      # gitcalver versions only a branch's first-parent chain, and PR-merge and
+      # tag checkouts are on no branch, so put one at HEAD and pass it as
+      # `branch:` to every step.
+      - run: git checkout -B "$TEST_BRANCH"
       - uses: ./
         id: version
         with:
-          branch: ${{ github.head_ref || github.ref_name }}
+          branch: ${{ env.TEST_BRANCH }}
       - env:
           VERSION: ${{ steps.version.outputs.version }}
           DATE: ${{ steps.version.outputs.date }}
@@ -66,12 +73,12 @@ jobs:
           prefix: '0.'
           tag-prefix: 'release/v'
           remote: origin
-          branch: ${{ github.head_ref || github.ref_name }}
+          branch: ${{ env.TEST_BRANCH }}
       - uses: ./
         id: go
         with:
           prefix: 'v0.'
-          branch: ${{ github.head_ref || github.ref_name }}
+          branch: ${{ env.TEST_BRANCH }}
       - env:
           SEMVER_VERSION: ${{ steps.semver.outputs.version }}
           SEMVER_TAG: ${{ steps.semver.outputs.tag }}
@@ -85,7 +92,7 @@ jobs:
         id: dirty
         with:
           dirty: '-dirty'
-          branch: ${{ github.head_ref || github.ref_name }}
+          branch: ${{ env.TEST_BRANCH }}
       - env:
           DIRTY: ${{ steps.dirty.outputs.dirty }}
           VERSION: ${{ steps.dirty.outputs.version }}
@@ -97,7 +104,7 @@ jobs:
         with:
           dirty: '-dirty'
           dirty-hash: 'false'
-          branch: ${{ github.head_ref || github.ref_name }}
+          branch: ${{ env.TEST_BRANCH }}
       - env:
           VERSION: ${{ steps.nohash.outputs.version }}
         run: |
@@ -107,7 +114,7 @@ jobs:
         continue-on-error: true
         with:
           dirty: '-dirty'
-          branch: ${{ github.head_ref || github.ref_name }}
+          branch: ${{ env.TEST_BRANCH }}
           tag: 'true'
       - env:
           OUTCOME: ${{ steps.dirty-tag.outcome }}
