@@ -756,6 +756,15 @@ fi
 
 # --- Check dirty workspace (only for HEAD) ---
 
+# Display settings must not decide what counts as uncommitted. Settings given
+# with -c also reach the status git runs in each submodule. Rename detection
+# would read blobs a partial clone may lack, and the optional index lock would
+# block other git commands for the whole scan.
+workspace_git() {
+    git --no-optional-locks -c status.showUntrackedFiles=normal \
+        -c status.renames=false "$@"
+}
+
 IS_DIRTY=false
 if $OFF_BRANCH; then
     IS_DIRTY=true
@@ -767,7 +776,14 @@ elif ! $TARGET_SET; then
     IS_BARE_REPOSITORY=$(git rev-parse --is-bare-repository) ||
         die "cannot determine whether repository is bare"
     if [ "$IS_BARE_REPOSITORY" = "false" ]; then
-        WORKTREE_STATUS=$(git status --porcelain 2>/dev/null) ||
+        # --ignore-submodules=none governs only the submodules directly
+        # below the repository it is given to, so status also runs inside
+        # every submodule.
+        WORKTREE_STATUS=$({
+            workspace_git status --porcelain --ignore-submodules=none &&
+                workspace_git submodule --quiet foreach --recursive \
+                    'git status --porcelain --ignore-submodules=none'
+        } 2>/dev/null) ||
             die "local history cannot prove workspace state" \
                 "$EXIT_INCOMPLETE_HISTORY"
         [ -z "$WORKTREE_STATUS" ] || IS_DIRTY=true

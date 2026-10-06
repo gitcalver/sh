@@ -193,6 +193,58 @@ commit_at "2026-04-10T09:00:00Z"
 echo "new" >untracked.txt
 assert_exit "dirty: untracked non-ignored file" 2 \
     "$GITCALVER"
+git config status.showUntrackedFiles no
+assert_exit "dirty: untracked file despite status.showUntrackedFiles=no" 2 \
+    "$GITCALVER"
+
+new_repo "dirty_submodule_source"
+commit_at "2026-04-10T09:00:00Z"
+new_repo "dirty_submodule"
+git -c protocol.file.allow=always submodule --quiet add \
+    "$TMPDIR_BASE/dirty_submodule_source" sub
+commit_at "2026-04-10T09:01:00Z" "add submodule"
+echo "new" >sub/untracked.txt
+assert_exit "dirty: untracked file in submodule" 2 \
+    "$GITCALVER"
+git -C sub config status.showUntrackedFiles no
+assert_exit "dirty: submodule's own status.showUntrackedFiles=no" 2 \
+    "$GITCALVER"
+rm sub/untracked.txt
+git config -f .gitmodules submodule.sub.ignore all
+git add .gitmodules
+commit_at "2026-04-10T09:02:00Z" "ignore submodule changes"
+assert_output "clean: submodule at its recorded commit" "20260410.2" \
+    "$GITCALVER"
+git -C sub config user.email "test@test.com"
+git -C sub config user.name "Test"
+(cd sub && commit_at "2026-04-10T09:03:00Z" "move submodule")
+assert_exit "dirty: moved submodule despite .gitmodules ignore=all" 2 \
+    "$GITCALVER"
+git config submodule.sub.ignore all
+git config diff.ignoreSubmodules all
+assert_exit "dirty: moved submodule despite ignore settings in config" 2 \
+    "$GITCALVER"
+
+new_repo "nested_inner_source"
+commit_at "2026-04-10T09:00:00Z"
+new_repo "nested_middle_source"
+git -c protocol.file.allow=always submodule --quiet add \
+    "$TMPDIR_BASE/nested_inner_source" inner
+git config -f .gitmodules submodule.inner.ignore all
+git add .gitmodules
+commit_at "2026-04-10T09:01:00Z" "add inner"
+new_repo "nested_submodules"
+git -c protocol.file.allow=always submodule --quiet add \
+    "$TMPDIR_BASE/nested_middle_source" middle
+git -c protocol.file.allow=always submodule --quiet update --init --recursive
+commit_at "2026-04-10T09:02:00Z" "add middle"
+assert_output "clean: nested submodules at their recorded commits" \
+    "20260410.1" "$GITCALVER"
+git -C middle/inner config user.email "test@test.com"
+git -C middle/inner config user.name "Test"
+(cd middle/inner && commit_at "2026-04-10T09:03:00Z" "move inner")
+assert_exit "dirty: moved nested submodule despite its .gitmodules ignore=all" \
+    2 "$GITCALVER"
 
 new_repo "clean_gitignored"
 commit_at "2026-04-10T09:00:00Z"
@@ -203,6 +255,22 @@ GIT_COMMITTER_DATE="2026-04-10T09:01:00Z" git commit -m "add gitignore" \
 echo "this is ignored" >ignored.txt
 assert_output "clean: gitignored file" "20260410.2" \
     "$GITCALVER"
+
+new_repo "clean_index_unchanged"
+echo "tracked" >tracked.txt
+git add tracked.txt
+GIT_COMMITTER_DATE="2026-04-10T09:00:00Z" git commit -m "add tracked" \
+    --quiet --date="2026-04-10T09:00:00Z"
+touch -t 202001010000 tracked.txt
+INDEX_BEFORE=$(cksum <.git/index)
+assert_output "clean: tracked file with stale stat data" "20260410.1" \
+    "$GITCALVER"
+if [ "$(cksum <.git/index)" = "$INDEX_BEFORE" ]; then
+    pass "workspace check leaves the index unchanged"
+else
+    fail "workspace check leaves the index unchanged" "same index" \
+        "rewritten index"
+fi
 
 new_repo "dirty_default"
 commit_at "2026-04-10T09:00:00Z"
@@ -481,6 +549,13 @@ assert_output "partial clone succeeds without materializing blobs" \
     "$GITCALVER" HEAD
 assert_output "partial clone reverse lookup stays offline" "$PARTIAL_TIP" \
     "$GITCALVER" 20260411.1
+# Without a checkout, HEAD's partial.txt reads as a staged deletion. Staging a
+# new file beside it invites rename detection, which would need partial.txt's
+# absent blob.
+echo "renamed" >renamed.txt
+git add renamed.txt
+assert_exit "partial clone staged changes are dirty without blobs" 2 \
+    "$GITCALVER"
 
 # Build a promisor repository with only its tip commit. Reading the missing
 # first parent would normally start the configured remote helper. GitCalVer

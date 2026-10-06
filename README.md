@@ -85,6 +85,13 @@ Use `--no-dirty` to explicitly refuse dirty versions (overrides `--dirty`).
 
 Dirty versions are a convenience and are not necessarily unique.
 
+Untracked files that are not ignored, for example by `.gitignore` or
+`.git/info/exclude`, count as uncommitted changes even when
+`status.showUntrackedFiles` hides them from `git status`. So does a submodule
+whose checked-out commit differs from the recorded one, or whose work tree has
+changes, even when `diff.ignoreSubmodules` or `submodule.<name>.ignore`
+(including in `.gitmodules`) hides it.
+
 ### Reverse lookup
 
 Pass a version number instead of a revision to get the corresponding commit hash:
