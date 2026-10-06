@@ -185,19 +185,8 @@ export LC_ALL
 
 # --- Verify git repository ---
 
-# Resolve repository metadata through the common directory so linked worktrees
-# see the same deprecated graft file as the main worktree.
-GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null) ||
+GRAFT_FILE=$(git rev-parse --git-path info/grafts 2>/dev/null) ||
     die "not a git repository"
-case "$GIT_COMMON_DIR" in
-/*) ;;
-*)
-    GIT_COMMON_DIR=$(cd "$GIT_COMMON_DIR" && pwd -P) ||
-        die "cannot resolve git common directory"
-    ;;
-esac
-
-GRAFT_FILE="$GIT_COMMON_DIR/info/grafts"
 
 if [ -e "$GRAFT_FILE" ]; then
     die "commit graft file is not supported: $GRAFT_FILE" \
@@ -802,34 +791,33 @@ fi
 
 # --- Check dirty workspace (only for HEAD) ---
 
-# Display settings must not decide what counts as uncommitted. Settings given
-# with -c also reach the status git runs in each submodule. Rename detection
-# would read blobs a partial clone may lack, and the optional index lock would
-# block other git commands for the whole scan.
-workspace_git() {
-    git --no-optional-locks -c status.showUntrackedFiles=normal \
-        -c status.renames=false "$@"
-}
-
 # --ignore-submodules=none governs only the submodules directly below the
 # repository it is given to, so the check repeats inside every populated
 # submodule. Do not use `git submodule foreach`: it fails on a gitlink that
-# .gitmodules does not map. Like git's own submodule commands, the recursion
-# clears repository variables such as GIT_INDEX_FILE, which a hook may set for
-# the superproject.
+# .gitmodules does not map.
 worktree_changes() (
-    changes=$(workspace_git status --porcelain --ignore-submodules=none) ||
-        exit
+    # Display settings must not decide what counts as uncommitted. Settings
+    # given with -c also reach the status git runs in each submodule, which
+    # does not inherit GIT_NO_REPLACE_OBJECTS. Rename detection would read
+    # blobs a partial clone may lack, and the optional index lock would block
+    # other git commands for the whole scan.
+    changes=$(git --no-optional-locks -c core.useReplaceRefs=false \
+        -c status.showUntrackedFiles=normal -c status.renames=false \
+        status --porcelain --ignore-submodules=none) || exit
     if [ -n "$changes" ]; then
         printf '%s\n' "$changes"
         exit 0
     fi
-    top=$(git rev-parse --show-toplevel) || exit
-    cd "$top" || exit
-    # Git quotes a path containing a control character, quote, or backslash
-    # even with core.quotePath=false; such a gitlink cannot be entered.
+    # List from the caller's directory, which a relative GIT_DIR or
+    # GIT_WORK_TREE may name. sed narrows the listing because some awks are
+    # slow on a large index. Git quotes a path containing a control
+    # character, quote, or backslash even with core.quotePath=false; such a
+    # gitlink cannot be entered.
     gitlinks=$({
-        git -c core.quotePath=false ls-files --stage || echo failed
+        git -c core.quotePath=false ls-files --stage --full-name -- :/ ||
+            echo failed
+    } | {
+        sed -n -e '/^160000 /p' -e '/^failed$/p' || echo failed
     } | awk -F '\t' '
         $0 == "failed" { exit 1 }
         /^160000 / {
@@ -838,15 +826,25 @@ worktree_changes() (
         }
     ') || exit
     [ -n "$gitlinks" ] || exit 0
-    for var in $(git rev-parse --local-env-vars); do
+    top=$(git rev-parse --show-toplevel) || exit
+    vars=$(git rev-parse --local-env-vars) || exit
+    # Like git's own submodule commands, clear repository variables such as
+    # GIT_INDEX_FILE, which a hook may set for the superproject, and name each
+    # gitlink's repository with GIT_DIR. Discovery would apply safe.directory,
+    # and from a gitlink whose .git is not a repository it would climb back to
+    # the superproject and recurse without end.
+    for var in $vars; do
         case "$var" in
         GIT_CONFIG_PARAMETERS | GIT_CONFIG_COUNT) ;;
         *) unset "$var" ;;
         esac
     done
     printf '%s\n' "$gitlinks" | while IFS= read -r gitlink; do
-        [ -e "$gitlink/.git" ] || continue
-        changes=$(cd "./$gitlink" && worktree_changes) || exit
+        [ -e "$top/$gitlink/.git" ] || continue
+        # A hook git runs, such as core.fsmonitor, inherits standard input,
+        # which here carries the rest of the gitlink list.
+        changes=$(cd "$top/$gitlink" && GIT_DIR=$PWD/.git &&
+            export GIT_DIR && worktree_changes </dev/null) || exit
         if [ -n "$changes" ]; then
             printf '%s\n' "$changes"
             exit 0

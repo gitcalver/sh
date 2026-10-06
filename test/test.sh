@@ -245,6 +245,45 @@ git -C middle/inner config user.name "Test"
 (cd middle/inner && commit_at "2026-04-10T09:03:00Z" "move inner")
 assert_exit "dirty: moved nested submodule despite its .gitmodules ignore=all" \
     2 "$GITCALVER"
+mkdir subdir
+cd subdir
+assert_exit "dirty: moved nested submodule with a relative GIT_WORK_TREE" 2 \
+    env GIT_WORK_TREE=.. "$GITCALVER"
+cd ..
+
+# early sorts before middle, so its hook runs while middle is still unchecked.
+new_repo "stdin_reading_hook"
+git -c protocol.file.allow=always submodule --quiet add \
+    "$TMPDIR_BASE/nested_inner_source" early
+git -c protocol.file.allow=always submodule --quiet add \
+    "$TMPDIR_BASE/nested_middle_source" middle
+git -c protocol.file.allow=always submodule --quiet update --init --recursive
+commit_at "2026-04-10T09:02:00Z" "add submodules"
+printf '#!/bin/sh\ncat >/dev/null\n' >"$TMPDIR_BASE/stdin-reading-hook"
+chmod +x "$TMPDIR_BASE/stdin-reading-hook"
+git -C early config core.fsmonitor "$TMPDIR_BASE/stdin-reading-hook"
+git -C middle/inner config user.email "test@test.com"
+git -C middle/inner config user.name "Test"
+(cd middle/inner && commit_at "2026-04-10T09:03:00Z" "move inner")
+assert_exit "dirty: a hook reading standard input cannot skip a submodule" 2 \
+    "$GITCALVER"
+
+new_repo "replaced_submodule_source"
+echo "one" >file.txt
+git add file.txt
+commit_at "2026-04-10T09:00:00Z"
+new_repo "replaced_submodule"
+git -c protocol.file.allow=always submodule --quiet add \
+    "$TMPDIR_BASE/replaced_submodule_source" sub
+commit_at "2026-04-10T09:01:00Z" "add submodule"
+git -C sub config user.email "test@test.com"
+git -C sub config user.name "Test"
+echo "two" >sub/file.txt
+git -C sub add file.txt
+git -C sub replace HEAD \
+    "$(git -C sub commit-tree "$(git -C sub write-tree)" -m "replacement")"
+assert_exit "dirty: staged submodule change despite a replace ref" 2 \
+    "$GITCALVER"
 
 new_repo "deep_leaf_source"
 commit_at "2026-04-10T09:00:00Z"
@@ -274,11 +313,9 @@ assert_exit "dirty: moved submodule three levels down despite ignore=all" 2 \
 
 # A repository added with plain `git add` is a gitlink that .gitmodules does
 # not map; git status still proves whether it changed.
+new_repo "unmapped_gitlink/embedded"
+commit_at "2026-04-10T09:00:00Z" "embedded"
 new_repo "unmapped_gitlink"
-git init --quiet -b main embedded
-git -C embedded config user.email "test@test.com"
-git -C embedded config user.name "Test"
-(cd embedded && commit_at "2026-04-10T09:00:00Z" "embedded")
 git add embedded 2>/dev/null
 commit_at "2026-04-10T09:01:00Z" "add embedded repository"
 assert_output "clean: gitlink without a .gitmodules entry" "20260410.1" \
@@ -309,8 +346,7 @@ assert_output "clean: gitignored file" "20260410.2" \
 new_repo "clean_index_unchanged"
 echo "tracked" >tracked.txt
 git add tracked.txt
-GIT_COMMITTER_DATE="2026-04-10T09:00:00Z" git commit -m "add tracked" \
-    --quiet --date="2026-04-10T09:00:00Z"
+commit_at "2026-04-10T09:00:00Z" "add tracked"
 touch -t 202001010000 tracked.txt
 INDEX_BEFORE=$(cksum <.git/index)
 assert_output "clean: tracked file with stale stat data" "20260410.1" \
@@ -321,6 +357,38 @@ else
     fail "workspace check leaves the index unchanged" "same index" \
         "rewritten index"
 fi
+
+new_repo "relative_git_environment"
+commit_at "2026-04-10T09:00:00Z"
+mkdir subdir
+cd subdir
+assert_output "clean: relative GIT_DIR and GIT_WORK_TREE from a subdirectory" \
+    "20260410.1" env GIT_DIR=../.git GIT_WORK_TREE=.. "$GITCALVER"
+
+new_repo "separate_work_tree_source"
+commit_at "2026-04-10T09:00:00Z"
+git clone --quiet --bare "$TMPDIR_BASE/separate_work_tree_source" \
+    "$TMPDIR_BASE/separate_work_tree.git"
+mkdir "$TMPDIR_BASE/separate_work_tree"
+git --git-dir="$TMPDIR_BASE/separate_work_tree.git" \
+    --work-tree="$TMPDIR_BASE/separate_work_tree" checkout --quiet -f main
+cd "$TMPDIR_BASE/separate_work_tree.git"
+assert_output "clean: bare repository checked out to a separate work tree" \
+    "20260410.1" \
+    env GIT_DIR=. GIT_WORK_TREE="$TMPDIR_BASE/separate_work_tree" "$GITCALVER"
+
+new_repo "core_worktree_source"
+commit_at "2026-04-10T09:00:00Z"
+git clone --quiet --bare "$TMPDIR_BASE/core_worktree_source" \
+    "$TMPDIR_BASE/core_worktree.git"
+mkdir "$TMPDIR_BASE/core_worktree_site"
+git -C "$TMPDIR_BASE/core_worktree.git" config core.bare false
+git -C "$TMPDIR_BASE/core_worktree.git" config core.worktree \
+    "$TMPDIR_BASE/core_worktree_site"
+cd "$TMPDIR_BASE/core_worktree.git"
+git checkout --quiet -f main
+assert_output "clean: work tree named by core.worktree" "20260410.1" \
+    "$GITCALVER"
 
 new_repo "dirty_default"
 commit_at "2026-04-10T09:00:00Z"
@@ -738,6 +806,27 @@ GRAFT_PATH=$(git rev-parse --git-common-dir)/info/grafts
 printf '%s\n' "$(git rev-parse HEAD)" >"$GRAFT_PATH"
 assert_exit "legacy graft file returns incomplete history" 4 \
     "$GITCALVER"
+
+# Only the graft-file check rejects a graft that adds a same-day parent.
+new_repo "graft_file_adds_parent"
+commit_at "2026-04-10T09:00:00Z" "first"
+GRAFT_FIRST=$(git rev-parse HEAD)
+git checkout --orphan graft_side --quiet
+commit_at "2026-04-10T10:00:00Z" "side"
+GRAFT_SIDE=$(git rev-parse HEAD)
+git checkout main --quiet
+commit_at "2026-04-10T12:00:00Z" "second"
+printf '%s %s %s\n' "$(git rev-parse HEAD)" "$GRAFT_FIRST" "$GRAFT_SIDE" \
+    >"$(git rev-parse --git-common-dir)/info/grafts"
+assert_exit "legacy graft file adding a parent is rejected" 4 "$GITCALVER"
+assert_exit "exported CDPATH does not hide the graft file" 4 \
+    env CDPATH=. "$GITCALVER"
+
+new_repo "cdpath_elsewhere"
+commit_at "2026-04-10T09:00:00Z"
+mkdir "$TMPDIR_BASE/cdpath_elsewhere_target"
+assert_output "exported CDPATH does not change repository discovery" \
+    "20260410.1" env CDPATH="$TMPDIR_BASE/cdpath_elsewhere_target" "$GITCALVER"
 
 # Some awks abort on bytes that are invalid in a multibyte locale.
 new_repo "non_utf8_root"
