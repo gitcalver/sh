@@ -171,10 +171,12 @@ esac
 # Version calculation is local-only. In a partial clone, missing objects must
 # produce the incomplete-history result instead of implicitly contacting a
 # promisor remote. Replacement refs are also excluded so every invocation sees
-# the repository's actual object graph.
+# the repository's actual object graph. Git must also use the shallow and graft
+# files checked below, and honor core.commitGraph=false.
 GIT_NO_LAZY_FETCH=1
 GIT_NO_REPLACE_OBJECTS=1
 export GIT_NO_LAZY_FETCH GIT_NO_REPLACE_OBJECTS
+unset GIT_SHALLOW_FILE GIT_GRAFT_FILE GIT_TEST_COMMIT_GRAPH
 
 # --- Verify git repository ---
 
@@ -279,7 +281,7 @@ is_genuine_root() (
 # ancestry did not stop at a shallow boundary and did not encounter a missing
 # promised commit.
 history_is_complete() (
-    git rev-list "$1" >/dev/null 2>&1 || exit "$EXIT_INCOMPLETE_HISTORY"
+    git rev-list "$1" -- >/dev/null 2>&1 || exit "$EXIT_INCOMPLETE_HISTORY"
     [ -f "$SHALLOW_FILE" ] || exit 0
 
     while IFS= read -r boundary; do
@@ -307,7 +309,7 @@ find_reachable_branch_anchor() (
     # reachable anchor. If nothing remains, the selected tip itself is
     # reachable. A root with no first parent means the histories do not meet.
     unreachable_count=$(git rev-list --count --first-parent \
-        "$branch_tip" "^$rev" 2>/dev/null) ||
+        "$branch_tip" "^$rev" -- 2>/dev/null) ||
         exit "$EXIT_INCOMPLETE_HISTORY"
     if [ "$unreachable_count" -eq 0 ]; then
         printf '%s\n' "$branch_tip"
@@ -334,121 +336,297 @@ find_reachable_branch_anchor() (
     exit "$EXIT_NOT_TRACEABLE"
 )
 
-# Compute REV's UTC committer date and the size of its date cohort: the
-# commits reachable from REV through any parent, visiting each one once,
-# where a same-date commit is counted and its parents explored; a strictly
-# older commit is visited (to learn its date) but not explored past; and a
-# strictly newer commit invalidates the result and dies. This is a pruned
-# walk, not a full reachability scan: a same-date commit sitting behind an
-# older-dated commit is never reached, so it is not counted, and a
-# newer-dated commit buried behind an older-dated commit is never reached
-# either, so it is tolerated rather than rejected. Visiting REV's own parents
-# first (REV is trivially a member of its own cohort) means this same walk
-# also performs the "committer dates go backwards" check, across every
-# parent rather than just one chain. Prints "DATE COUNT". Defined ahead of
-# reverse lookup, which also calls it once per date-block member.
-compute_version_fields() (
-    # rev is always a full object ID -- forward resolution, anchor lookup,
-    # and reverse's block members all pass resolved hashes -- so it can
-    # index the dump's %H fields directly as the walk's starting node.
-    rev="$1"
+# Howard Hinnant's civil_from_days. A timestamp too large for shell arithmetic
+# is printed unchanged.
+utc_date() (
+    case "$1" in
+    ????????????????*)
+        printf '%s\n' "$1"
+        exit 0
+        ;;
+    esac
+    days=$(($1 / 86400 + 719468))
+    era=$((days / 146097))
+    doe=$((days - era * 146097))
+    yoe=$(((doe - doe / 1460 + doe / 36524 - doe / 146096) / 365))
+    doy=$((doe - (365 * yoe + yoe / 4 - yoe / 100)))
+    mp=$(((5 * doy + 2) / 153))
+    month=$((mp < 10 ? mp + 3 : mp - 9))
+    printf '%04d%02d%02d\n' "$((era * 400 + yoe + (month <= 2)))" \
+        "$month" "$((doy - (153 * mp + 2) / 5 + 1))"
+)
 
-    dump=$(TZ=UTC git log "$rev" --format='%H%x09%P%x09%cd' \
-        --date=format-local:'%Y%m%d' 2>/dev/null) ||
-        die "local history cannot prove the target's date cohort" \
-            "$EXIT_INCOMPLETE_HISTORY"
+# Howard Hinnant's days_from_civil, for a valid YYYYMMDD date. The leading 1
+# keeps shell arithmetic from reading a zero-padded field as octal.
+epoch_day() (
+    year=$((1${1%????} - 10000))
+    month_day=$((1${1#????} - 10000))
+    month=$((month_day / 100))
+    day=$((month_day % 100))
+    year=$((year - (month <= 2)))
+    era=$((year / 400))
+    yoe=$((year - era * 400))
+    doy=$(((153 * (month > 2 ? month - 3 : month + 9) + 2) / 5 + day - 1))
+    echo $((era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468))
+)
 
-    result=$(printf '%s\n' "$dump" | awk -F '\t' -v root="$rev" '
-        {
-            date_of[$1] = $3
-            parents[$1] = $2
-            known[$1] = 1
+die_decreasing() {
+    die "committer dates go backwards (found $(utc_date "$1") after $(utc_date "$2") in history)"
+}
+
+die_unprovable() {
+    die "local history cannot prove the target date cohort" \
+        "$EXIT_INCOMPLETE_HISTORY"
+}
+
+# Without exclusions or ordering options, rev-list streams its walk and skips
+# each commit older than --since without queueing its parents, so the only
+# older commits it reads are those that bound the walk. Do not add a
+# ^exclusion or an ordering option: either switches git to a limited walk,
+# which hides a same-date commit that is also behind an older one. The
+# commit-graph lets git walk past commits whose objects are missing, so every
+# commit is read from its object instead. --since=@<epoch> +0000 is parsed
+# exactly; git before 2.43.1 reads --max-age with atoi, which overflows after
+# January 2038.
+date_walk() (
+    since=$1
+    shift
+    git -c core.commitGraph=false rev-list --timestamp --parents \
+        --since="@$since +0000" "$@" -- 2>/dev/null
+)
+
+boundary_oids() {
+    printf '%s\n' "$1" | awk '$2 ~ /^-/ { print substr($2, 2) }'
+}
+
+# The walk skips a commit as older by git's parse of its header, which reads
+# a malformed commit's date (one with no author line, say) as 0 or a partial
+# number. A commit whose date the result depends on, the target or one the
+# walk skipped, must read the same through %ct, from its committer line.
+check_dates() (
+    [ -n "$1" ] || exit 0
+    listing=$(printf '%s\n' "$1" | git -c core.commitGraph=false rev-list \
+        --no-walk --stdin --timestamp --format='date %ct' -- 2>/dev/null) ||
+        die_unprovable
+    bad=$(printf '%s\n' "$listing" | awk '
+        $2 == "commit" && oid == "" {
+            stamp = $1 ""
+            oid = $3
+            next
         }
-        END {
-            if (!(root in known)) {
+        oid != "" && $1 == "date" && NF == 2 && $2 "" == stamp {
+            oid = ""
+            next
+        }
+        {
+            print (oid == "" ? "unknown" : oid)
+            failed = 1
+            exit
+        }
+        END { if (!failed && oid != "") print oid }
+    ')
+    [ -z "$bad" ] || die "malformed committer date in commit $bad"
+)
+
+# Each member in $4 (oldest first) is on the first-parent chain of the next,
+# so each cohort contains the preceding ones: the visited set carries over
+# and counts each commit once. Walk $1 must start from the newest member.
+count_cohorts() (
+    # Git lists a shallow cut as parentless, like a root.
+    cuts=$(printf '%s\n' "$1" | awk 'NF == 2 && $2 !~ /^-/ { print $2 }' |
+        while IFS= read -r oid; do
+            is_genuine_root "$oid" || printf 'cut %s\n' "$oid"
+        done)
+    result=$({
+        printf '%s\n' "$4" | sed 's/^/member /'
+        printf '%s\n' "$1"
+        printf '%s\n' "$cuts"
+    } | awk -v next_midnight="$2" -v target_n="$3" '
+        function add_cohort(oid, qn, i, cur, n, p, j, unprovable) {
+            if (!(oid in stamp)) {
                 print "missing"
                 exit
             }
-            target = date_of[root]
-            queue[1] = root
-            visited[root] = 1
             qn = 1
-            count = 0
-            plist = ""
-            i = 1
-            while (i <= qn) {
+            queue[1] = oid
+            seen[oid] = 1
+            for (i = 1; i <= qn; i++) {
                 cur = queue[i]
-                i++
+                # A parent missing from the walk is one git skipped as older.
+                if (!(cur in stamp)) continue
+                if (stamp[cur] + 0 >= next_midnight + 0) {
+                    print "decreasing", stamp[cur]
+                    exit
+                }
                 count++
-                # A literal single space as the third argument requests the
-                # whitespace-collapsing split regardless of FS (set to a tab
-                # above, for the record columns); a bare two-argument split
-                # would instead split on that tab.
-                nump = split(parents[cur], p, " ")
-                if (nump == 0) {
-                    plist = plist cur "\n"
+                if (cur in cut) {
+                    unprovable = 1
                     continue
                 }
-                for (k = 1; k <= nump; k++) {
-                    par = p[k]
-                    if (visited[par]) continue
-                    visited[par] = 1
-                    if (!(par in known)) {
-                        print "missing"
-                        exit
-                    }
-                    if (date_of[par] == target) {
-                        qn++
-                        queue[qn] = par
-                    } else if ((date_of[par] + 0) > (target + 0)) {
-                        print "reject", date_of[par], target
-                        exit
-                    }
-                    # Strictly older: its date is now known, but it is not
-                    # queued, so its own parents are never examined.
+                n = split(parents[cur], p, " ")
+                for (j = 1; j <= n; j++) {
+                    if (p[j] in seen) continue
+                    seen[p[j]] = 1
+                    queue[++qn] = p[j]
                 }
             }
-            print "count", target, count
-            printf "%s", plist
-        }')
-
-    read -r state a b <<EOF
+            # Report a shallow cut only once the cohort is known to contain
+            # no newer commit, which takes precedence.
+            if (unprovable) {
+                print "unprovable"
+                exit
+            }
+        }
+        $1 == "member" { member[++members] = $2; next }
+        $1 == "cut" { cut[$2] = 1; next }
+        NF >= 2 && $2 !~ /^-/ {
+            stamp[$2] = $1 ""
+            for (i = 3; i <= NF; i++) parents[$2] = parents[$2] " " $i
+        }
+        END {
+            for (m = 1; m <= members; m++) {
+                add_cohort(member[m])
+                if (target_n == "") continue
+                if (count == target_n + 0) {
+                    print "found", member[m]
+                    exit
+                }
+                if (count > target_n + 0) {
+                    print "notfound"
+                    exit
+                }
+            }
+            print "count", count
+        }
+    ') || exit $?
+    read -r state value <<EOF
 $result
 EOF
-    state=${state:-missing}
     case "$state" in
-    count)
-        date=$a
-        count=$b
-        # Every cohort member that appeared parentless in the dump must be a
-        # genuine root, not a shallow or partial-clone cut hiding a same-date
-        # ancestor.
-        plist=$(printf '%s\n' "$result" | sed '1d')
-        while IFS= read -r node; do
-            [ -n "$node" ] || continue
-            is_genuine_root "$node" ||
-                die "local history cannot prove the target's date cohort" \
-                    "$EXIT_INCOMPLETE_HISTORY"
-        done <<EOF
-$plist
+    count | found | notfound) printf '%s\n' "$result" ;;
+    decreasing) die_decreasing "$value" "$(($2 - 86400))" ;;
+    *) die_unprovable ;;
+    esac
+)
+
+compute_version_core() (
+    start=$(date_walk 0 --no-walk "$1") || die_unprovable
+    start=${start%% *}
+    date=$(utc_date "$start")
+    case "$date" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+    *) die "committer date out of range: $start" ;;
+    esac
+    start=$((start - start % 86400))
+
+    walk=$(date_walk "$start" --boundary "$1") || die_unprovable
+    check_dates "$1
+$(boundary_oids "$walk")" || exit $?
+    result=$(count_cohorts "$walk" "$((start + 86400))" "" "$1") || exit $?
+    printf '%s.%s\n' "$date" "${result#count }"
+)
+
+find_version_commit() (
+    day=$(epoch_day "$1")
+    next_midnight=$(((day + 1) * 86400))
+    # Git cannot store a commit date before 1970; walk the whole chain.
+    start=$((day < 0 ? 0 : day * 86400))
+
+    # Delimit the target date's block on the first-parent chain and prove its
+    # older boundary: git read the first parent it skipped, or the chain ends
+    # at the last commit listed. The commits git lists before failing on a
+    # missing object still prove that dates go backwards.
+    block=$({ date_walk "$start" --first-parent "$3" || echo failed; } |
+        awk -v next_midnight="$next_midnight" '
+            $1 == "failed" {
+                print "failed"
+                done = 1
+                exit
+            }
+            NR > 1 && int($1 / 86400) > int(newer / 86400) {
+                print "decreasing", $1, newer
+                done = 1
+                exit
+            }
+            {
+                newer = $1 ""
+                root = NF == 2 ? $2 : "-"
+                skipped = NF > 2 ? $3 : "-"
+                if ($1 + 0 >= next_midnight + 0) next
+                member[++count] = $2
+            }
+            END {
+                if (done) exit
+                if (NR == 0) {
+                    print "empty"
+                    exit
+                }
+                print "chain", root, skipped, count + 0
+                for (i = count; i >= 1; i--) print member[i]
+            }
+        ')
+    read -r state newer older <<EOF
+$block
 EOF
-        printf '%s %s\n' "$date" "$count"
-        ;;
-    reject)
-        die "committer dates go backwards (found $a after $b in history)"
-        ;;
-    missing | *)
-        die "local history cannot prove the target's date cohort" \
-            "$EXIT_INCOMPLETE_HISTORY"
+    case "$state" in
+    decreasing) die_decreasing "$newer" "$older" ;;
+    failed) die_unprovable ;;
+    empty) die "version not found: $POSITIONAL" ;;
+    esac
+    read -r _ root skipped total <<EOF
+$block
+EOF
+    [ "$root" = - ] || is_genuine_root "$root" || die_unprovable
+    if [ "$total" -eq 0 ]; then
+        [ "$skipped" = - ] || check_dates "$skipped" || exit $?
+        die "version not found: $POSITIONAL"
+    fi
+    members=$(printf '%s\n' "$block" | sed 1d)
+
+    # A missing object fails git's whole walk, but cannot change versions
+    # whose cohorts do not reach it. Each member's walk contains the walks of
+    # older members, so failures are monotonic along the block: binary search,
+    # starting from the newest member, finds the newest member whose walk
+    # succeeds.
+    known=0
+    failed=$((total + 1))
+    mid=$total
+    while [ $((failed - known)) -gt 1 ]; do
+        if probe=$(date_walk "$start" --boundary \
+            "$(printf '%s\n' "$members" | sed -n "${mid}p")"); then
+            known=$mid
+            walk=$probe
+        else
+            failed=$mid
+        fi
+        mid=$(((known + failed) / 2))
+    done
+    [ "$known" -gt 0 ] || die_unprovable
+    check_dates "$(boundary_oids "$walk")" || exit $?
+
+    result=$(count_cohorts "$walk" "$next_midnight" "$2" \
+        "$(printf '%s\n' "$members" | sed "${known}q")") || exit $?
+    read -r state value <<EOF
+$result
+EOF
+    case "$state" in
+    found) printf '%s\n' "$value" ;;
+    notfound) die "version not found: $POSITIONAL" ;;
+    *)
+        [ "$known" -eq "$total" ] || die_unprovable
+        die "version not found: $POSITIONAL"
         ;;
     esac
 )
 
 # Cache the selected branch tip once so every calculation in this invocation
 # uses the same local view even if another process updates a ref concurrently.
+# A remote-tracking ref can name an annotated tag, so keep the commit it peels
+# to.
 DEFAULT_BRANCH_TIP=$(resolve_branch_tip "$DEFAULT_BRANCH") ||
     die "cannot resolve default branch: $DEFAULT_BRANCH"
-git cat-file -e "$DEFAULT_BRANCH_TIP^{commit}" 2>/dev/null ||
+DEFAULT_BRANCH_TIP=$(git rev-parse --verify \
+    "$DEFAULT_BRANCH_TIP^{commit}" 2>/dev/null) ||
     die "selected branch tip is missing from local history: $DEFAULT_BRANCH" \
         "$EXIT_INCOMPLETE_HISTORY"
 
@@ -501,108 +679,6 @@ if [ -n "$PREFIX" ] && [ -n "$CORE" ] && [ "$LOOKUP" = "$POSITIONAL" ]; then
     die "version $POSITIONAL is missing required prefix \"$PREFIX\""
 fi
 
-find_version_commit() (
-    target_date="$1"
-    target_n="$2"
-    branch_tip="$3"
-
-    # Stream one first-parent log through awk to delimit the target date's
-    # block on the selected branch and prove its older boundary. This does
-    # not determine N by itself: a block member's N can include commits
-    # reachable only through a second parent, so N is not a function of
-    # position within this first-parent block. It emits the full block
-    # instead (newest to oldest, matching the order commits are
-    # encountered), for the per-member scan below.
-    result=$(TZ=UTC git log "$branch_tip" --first-parent \
-        --format='%H%x09%cd' --date=format-local:'%Y%m%d' 2>/dev/null |
-        awk -F '\t' -v td="$target_date" '
-            NR > 1 && ($2 + 0) > (newer + 0) {
-                print "decreasing", $2, newer
-                done = 1
-                exit
-            }
-            {
-                newer = $2
-                last = $1
-                if ($2 == td) {
-                    hashes[++count] = $1
-                    next
-                }
-                if (($2 + 0) < (td + 0)) {
-                    done = 1
-                    if (count > 0) {
-                        print "found", last
-                        for (i = count; i >= 1; i--) print hashes[i]
-                    } else {
-                        print "notfound"
-                    }
-                    exit
-                }
-            }
-            END {
-                if (done) exit
-                if (NR == 0) {
-                    print "missing"
-                    exit
-                }
-                print "boundary", last
-                for (i = count; i >= 1; i--) print hashes[i]
-            }
-        ')
-
-    read -r state value detail <<EOF
-$result
-EOF
-    state=${state:-missing}
-    case "$state" in
-    found) ;;
-    notfound)
-        die "version not found: $POSITIONAL"
-        ;;
-    decreasing)
-        die "committer dates go backwards (found $value after $detail in history)"
-        ;;
-    boundary)
-        is_genuine_root "$value" ||
-            die "local history ended before version could be proved" \
-                "$EXIT_INCOMPLETE_HISTORY"
-        ;;
-    *)
-        die "local history ended before version could be proved" \
-            "$EXIT_INCOMPLETE_HISTORY"
-        ;;
-    esac
-
-    # The target-date block is proved complete; walk its members oldest to
-    # newest, computing each one's own date cohort independently. Cohort size
-    # strictly increases between chain-adjacent members (a member's cohort
-    # always contains its first-parent predecessor's cohort plus itself), so
-    # once a member's count passes the requested N, no later member can equal
-    # it either: stop and report not found rather than searching further.
-    block=$(printf '%s\n' "$result" | sed '1d')
-    while IFS= read -r member; do
-        [ -n "$member" ] || continue
-        if MEMBER_FIELDS=$(compute_version_fields "$member"); then
-            :
-        else
-            exit $?
-        fi
-        read -r _ member_count <<FIELDS
-$MEMBER_FIELDS
-FIELDS
-        if [ "$member_count" -eq "$target_n" ]; then
-            printf '%s\n' "$member"
-            exit 0
-        elif [ "$member_count" -gt "$target_n" ]; then
-            break
-        fi
-    done <<BLOCK
-$block
-BLOCK
-
-    die "version not found: $POSITIONAL"
-)
-
 if [ -n "$CORE" ]; then
     TARGET_DATE=${CORE%%.*}
     TARGET_N=${CORE#*.}
@@ -638,8 +714,8 @@ if $TARGET_SET; then
     # --verify is required for safety: without it, git rev-parse echoes an
     # unrecognized option-like argument (e.g. "-foo") back unchanged and exits
     # 0, so the "validation" would pass and the attacker-controlled string would
-    # flow on into git merge-base/git log as an option. --verify forces a single
-    # resolved revision and rejects anything that is not one.
+    # flow on into git rev-list/git merge-base as an option. --verify forces a
+    # single resolved revision and rejects anything that is not one.
     if REV=$(git rev-parse --verify "$POSITIONAL^{commit}" 2>/dev/null); then
         :
     elif RESOLVED_REV=$(git rev-parse --verify "$POSITIONAL" 2>/dev/null) &&
@@ -708,17 +784,15 @@ fi
 
 # --- Compute version ---
 
-if VERSION_FIELDS=$(compute_version_fields "$REV"); then
-    read -r DATE COUNT <<EOF
-$VERSION_FIELDS
-EOF
+if VERSION_CORE=$(compute_version_core "$REV"); then
+    :
 else
     exit $?
 fi
 
 # --- Format output ---
 
-VERSION="${PREFIX}${DATE}.${COUNT}"
+VERSION="${PREFIX}${VERSION_CORE}"
 
 if $IS_DIRTY; then
     if $NO_DIRTY_HASH; then

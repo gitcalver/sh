@@ -111,6 +111,18 @@ commit_at_split() {
         --quiet --date="$author_date"
 }
 
+loose_object_path() {
+    printf '.git/objects/%.2s/%s\n' "$1" "${1#??}"
+}
+
+remove_object() {
+    rm -f "$(loose_object_path "$1")"
+    if git cat-file -e "$1" 2>/dev/null; then
+        echo "test setup: object $1 is not loose" >&2
+        exit 1
+    fi
+}
+
 echo "=== gitcalver test suite ==="
 echo ""
 
@@ -385,6 +397,23 @@ cd "$TMPDIR_BASE/shallow_worktree"
 assert_output "shallow linked worktree uses common boundary" "20260411.1" \
     "$GITCALVER"
 
+ESCAPED_PATH="$TMPDIR_BASE/back\slash"
+mkdir "$ESCAPED_PATH"
+git clone --depth 2 "file://$TMPDIR_BASE/shallow_source" \
+    "$ESCAPED_PATH/repo" --quiet
+cd "$ESCAPED_PATH/repo"
+assert_output "backslash in a shallow repository path (forward)" "20260411.1" \
+    "$GITCALVER" HEAD
+assert_output "backslash in a shallow repository path (reverse)" \
+    "$SHALLOW_TIP" "$GITCALVER" 20260411.1
+git config user.email "test@test.com"
+git config user.name "Test"
+git checkout --orphan unrelated --quiet
+commit_at "2026-04-12T09:00:00Z" "unrelated"
+git checkout main --quiet
+assert_exit "backslash path still reads the shallow boundary" 4 \
+    "$GITCALVER" --branch unrelated "$SHALLOW_TIP"
+
 # A shallow boundary inside the requested date block cannot prove N.
 git clone --depth 3 "file://$TMPDIR_BASE/shallow_source" \
     "$TMPDIR_BASE/shallow_inside_block" --quiet
@@ -464,11 +493,9 @@ git config extensions.partialClone blocked
 git config remote.blocked.promisor true
 git config remote.blocked.partialCloneFilter blob:none
 git config remote.blocked.url "blocked::missing"
-PARTIAL_OBJECT_DIR=$(printf '%.2s' "$PARTIAL_TIP")
-PARTIAL_OBJECT_FILE=$(printf '%s' "$PARTIAL_TIP" | cut -c3-)
-mkdir -p ".git/objects/$PARTIAL_OBJECT_DIR"
-cp "$TMPDIR_BASE/partial_source/.git/objects/$PARTIAL_OBJECT_DIR/$PARTIAL_OBJECT_FILE" \
-    ".git/objects/$PARTIAL_OBJECT_DIR/$PARTIAL_OBJECT_FILE"
+PARTIAL_OBJECT=$(loose_object_path "$PARTIAL_TIP")
+mkdir -p "${PARTIAL_OBJECT%/*}"
+cp "$TMPDIR_BASE/partial_source/$PARTIAL_OBJECT" "$PARTIAL_OBJECT"
 git update-ref refs/heads/main "$PARTIAL_TIP"
 BLOCKED_BIN="$TMPDIR_BASE/blocked-bin"
 BLOCKED_MARKER="$TMPDIR_BASE/lazy-fetch-attempted"
@@ -497,6 +524,77 @@ if [ -e "$BLOCKED_MARKER" ]; then
 else
     pass "core calculation performs no lazy fetch"
 fi
+
+new_repo "missing_ancestor_beyond_date_boundary"
+commit_at "2026-04-08T09:00:00Z" "missing ancestor"
+MISSING_REV=$(git rev-parse HEAD)
+commit_at "2026-04-09T09:00:00Z" "older boundary"
+commit_at "2026-04-10T09:00:00Z" "target"
+TARGET_REV=$(git rev-parse HEAD)
+remove_object "$MISSING_REV"
+assert_output "forward does not read past the older date boundary" \
+    "20260410.1" "$GITCALVER" HEAD
+assert_output "reverse does not read past the older date boundary" \
+    "$TARGET_REV" "$GITCALVER" 20260410.1
+
+new_repo "commit_graph_missing_cohort_member"
+commit_at "2026-04-09T09:00:00Z" "older boundary"
+commit_at "2026-04-10T09:00:00Z" "missing member"
+MISSING_REV=$(git rev-parse HEAD)
+commit_at "2026-04-10T10:00:00Z" "tip"
+git commit-graph write --reachable
+remove_object "$MISSING_REV"
+assert_exit "commit-graph does not stand in for a missing cohort member" 4 \
+    "$GITCALVER" HEAD
+assert_exit "reverse: commit-graph does not stand in for a missing member" 4 \
+    "$GITCALVER" 20260410.2
+assert_exit "commit-graph test override does not hide a missing member" 4 \
+    env GIT_TEST_COMMIT_GRAPH=1 "$GITCALVER" HEAD
+
+new_repo "commit_graph_missing_older_boundary"
+commit_at "2026-04-09T09:00:00Z" "missing older boundary"
+MISSING_REV=$(git rev-parse HEAD)
+commit_at "2026-04-10T09:00:00Z" "target"
+git commit-graph write --reachable
+remove_object "$MISSING_REV"
+assert_exit "commit-graph does not stand in for a missing boundary" 4 \
+    "$GITCALVER" HEAD
+assert_exit "reverse: commit-graph does not stand in for a missing boundary" 4 \
+    "$GITCALVER" 20260410.1
+
+# An implementation may refuse these overrides as unprovable, but must not
+# count a different history.
+new_repo "git_environment_overrides"
+commit_at "2026-04-09T09:00:00Z" "older"
+OVERRIDE_OLDER=$(git rev-parse HEAD)
+commit_at "2026-04-10T09:00:00Z" "first"
+commit_at "2026-04-10T10:00:00Z" "tip"
+OVERRIDE_TIP=$(git rev-parse HEAD)
+printf '%s %s\n' "$OVERRIDE_TIP" "$OVERRIDE_OLDER" >"$TMPDIR_BASE/override-graft"
+printf '%s\n' "$OVERRIDE_TIP" >"$TMPDIR_BASE/override-shallow"
+assert_match "GIT_GRAFT_FILE does not change the count" \
+    '^(20260410\.2|EXIT:4)$' \
+    env GIT_GRAFT_FILE="$TMPDIR_BASE/override-graft" "$GITCALVER"
+assert_match "reverse: GIT_GRAFT_FILE does not change the count" \
+    "^($OVERRIDE_TIP|EXIT:4)\$" \
+    env GIT_GRAFT_FILE="$TMPDIR_BASE/override-graft" "$GITCALVER" 20260410.2
+assert_match "GIT_SHALLOW_FILE does not change the count" \
+    '^(20260410\.2|EXIT:4)$' \
+    env GIT_SHALLOW_FILE="$TMPDIR_BASE/override-shallow" "$GITCALVER"
+assert_match "reverse: GIT_SHALLOW_FILE does not change the count" \
+    "^($OVERRIDE_TIP|EXIT:4)\$" \
+    env GIT_SHALLOW_FILE="$TMPDIR_BASE/override-shallow" "$GITCALVER" \
+    20260410.2
+git checkout -b override_feature "$OVERRIDE_OLDER" --quiet
+commit_at "2026-04-10T11:00:00Z" "feature"
+OVERRIDE_FEATURE=$(git rev-parse HEAD)
+OVERRIDE_FEATURE_SHORT=$(printf '%.7s' "$OVERRIDE_FEATURE")
+git checkout main --quiet
+printf '%s\n' "$OVERRIDE_FEATURE" >"$TMPDIR_BASE/override-shallow-feature"
+assert_match "GIT_SHALLOW_FILE does not hide an off-branch anchor" \
+    "^(20260409\\.1-dirty\\.$OVERRIDE_FEATURE_SHORT|EXIT:4)\$" \
+    env GIT_SHALLOW_FILE="$TMPDIR_BASE/override-shallow-feature" \
+    "$GITCALVER" --dirty "-dirty" "$OVERRIDE_FEATURE"
 
 # Replacement refs are ignored; the stored first-parent relationship wins.
 new_repo "replace_ref_ignored"
@@ -547,6 +645,38 @@ git checkout --orphan other --quiet
 commit_at "2026-04-10T10:00:00Z" "orphan"
 assert_exit "parent-like header continuation: unrelated history is conclusive" 3 \
     "$GITCALVER" --branch main
+
+new_repo "commit_message_batch_framing"
+EMPTY_TREE=$(git hash-object -w -t tree /dev/null)
+MESSAGE_ROOT=$(
+    {
+        printf 'tree %s\n' "$EMPTY_TREE"
+        printf 'author Test <test@test.com> 1775811600 +0000\n'
+        printf 'committer Test <test@test.com> 1775811600 +0000\n\n'
+        printf 'parent %s\ncommitter message text\n\n' "$EMPTY_TREE"
+        printf 'Unicode: café 日本語\nno trailing newline'
+    } | git hash-object -w -t commit --stdin
+)
+git update-ref refs/heads/main "$MESSAGE_ROOT"
+commit_at "2026-04-10T10:00:00Z" "child"
+MESSAGE_TIP=$(git rev-parse HEAD)
+assert_output "commit messages cannot change cohort headers or object framing" \
+    "20260410.2" "$GITCALVER"
+assert_output "reverse handles Unicode and unterminated commit messages" \
+    "$MESSAGE_TIP" "$GITCALVER" 20260410.2
+
+new_repo "nul_in_commit_message"
+{
+    printf 'commit refs/heads/main\n'
+    printf 'committer Test <test@test.com> 1775811600 +0000\n'
+    printf 'data 7\nnul\000msg\n'
+} | git fast-import --quiet
+NUL_ROOT=$(git rev-parse HEAD)
+commit_at "2026-04-10T10:00:00Z" "child"
+assert_output "NUL byte in a commit message (forward)" "20260410.2" \
+    "$GITCALVER"
+assert_output "NUL byte in a commit message (reverse)" "$NUL_ROOT" \
+    "$GITCALVER" 20260410.1
 
 # ---- --short in forward mode ----
 
@@ -609,6 +739,33 @@ assert_output "merged side-branch revision anchors at branch divergence" \
 # child, reachable through the merge's second parent) = 4, not 3.
 assert_output "merge commit remains on first-parent chain" "20260410.4" \
     "$GITCALVER"
+
+new_repo "repeated_merges_share_cohort"
+commit_at "2026-04-09T09:00:00Z" "base"
+commit_at "2026-04-10T09:00:00Z" "main-1"
+git checkout -b side --quiet
+commit_at "2026-04-10T10:00:00Z" "side-1"
+git checkout main --quiet
+commit_at "2026-04-10T11:00:00Z" "main-2"
+GIT_COMMITTER_DATE="2026-04-10T12:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-10T12:00:00Z" \
+    git merge side --no-ff -m "first merge" --quiet
+FIRST_MERGE=$(git rev-parse HEAD)
+git checkout side --quiet
+commit_at "2026-04-10T13:00:00Z" "side-2"
+git checkout main --quiet
+GIT_COMMITTER_DATE="2026-04-10T14:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-10T14:00:00Z" \
+    git merge side --no-ff -m "second merge" --quiet
+SECOND_MERGE=$(git rev-parse HEAD)
+assert_output "repeated merges count shared ancestors once" \
+    "20260410.6" "$GITCALVER"
+assert_output "reverse preserves the earlier merge cohort" \
+    "$FIRST_MERGE" "$GITCALVER" 20260410.4
+assert_exit "reverse preserves the gap between merge cohorts" 1 \
+    "$GITCALVER" 20260410.5
+assert_output "reverse adds only new ancestors at the next merge" \
+    "$SECOND_MERGE" "$GITCALVER" 20260410.6
 
 new_repo "diverged_branch_anchor"
 commit_at "2026-04-10T09:00:00Z" "base"
@@ -700,6 +857,22 @@ assert_output "same-date commit behind an older-dated commit is not counted" \
     "20260410.2" \
     "$GITCALVER"
 
+new_repo "same_date_also_behind_older_is_counted"
+commit_at "2026-04-10T09:00:00Z" "X same-date root"
+git checkout -b skewed --quiet
+commit_at "2026-04-09T09:00:00Z" "O older, clock skew"
+git checkout main --quiet
+commit_at "2026-04-10T10:00:00Z" "L same date"
+GIT_COMMITTER_DATE="2026-04-10T11:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-10T11:00:00Z" \
+    git merge skewed --no-ff -m "T tip" --quiet
+TIP_REV=$(git rev-parse HEAD)
+# X is behind the older O, but also behind the same-date L: cohort = T, L, X.
+assert_output "same-date commit also reached through an older one is counted" \
+    "20260410.3" "$GITCALVER"
+assert_output "reverse: same-date commit also behind an older one is counted" \
+    "$TIP_REV" "$GITCALVER" 20260410.3
+
 new_repo "buried_future_date_tolerated"
 commit_at "2026-04-15T09:00:00Z" "A buried future date"
 commit_at "2026-04-10T09:00:00Z" "B older, clock corrected"
@@ -777,6 +950,48 @@ assert_output "reverse lookup before the unprovable member still resolves" \
     "$GITCALVER" 20260410.1
 assert_exit "reverse lookup needing a shallow same-day second parent is unprovable" 4 \
     "$GITCALVER" 20260410.2
+
+cd "$TMPDIR_BASE/shallow_second_parent_same_date"
+remove_object "$(git rev-parse side)"
+assert_output "reverse resolves before a missing later second parent" \
+    "$(git rev-parse 'HEAD^')" "$GITCALVER" 20260410.1
+assert_exit "reverse reports a missing required second parent" 4 \
+    "$GITCALVER" 20260410.2
+
+new_repo "missing_second_parent_mid_block"
+commit_at "2026-04-09T09:00:00Z" "older"
+commit_at "2026-04-10T09:00:00Z" "m1"
+M1_REV=$(git rev-parse HEAD)
+git checkout -b side --quiet
+commit_at "2026-04-10T09:30:00Z" "side"
+SIDE_REV=$(git rev-parse HEAD)
+git checkout main --quiet
+commit_at "2026-04-10T10:00:00Z" "m2"
+M2_REV=$(git rev-parse HEAD)
+commit_at "2026-04-10T11:00:00Z" "m3"
+M3_REV=$(git rev-parse HEAD)
+GIT_COMMITTER_DATE="2026-04-10T12:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-10T12:00:00Z" \
+    git merge side --no-ff -m "m4" --quiet
+commit_at "2026-04-10T13:00:00Z" "m5"
+remove_object "$SIDE_REV"
+assert_output "reverse resolves the first of several members before a cut" \
+    "$M1_REV" "$GITCALVER" 20260410.1
+assert_output "reverse resolves a middle member before a cut" \
+    "$M2_REV" "$GITCALVER" 20260410.2
+assert_output "reverse resolves the last member before a cut" \
+    "$M3_REV" "$GITCALVER" 20260410.3
+assert_exit "reverse cannot prove a count past the last provable member" 4 \
+    "$GITCALVER" 20260410.4
+assert_exit "reverse cannot prove the newest member past a cut" 4 \
+    "$GITCALVER" 20260410.6
+
+git clone --depth 2 --single-branch --branch main \
+    "file://$TMPDIR_BASE/newer_adjacent_to_cohort_member" \
+    "$TMPDIR_BASE/newer_beside_shallow_cut" --quiet
+cd "$TMPDIR_BASE/newer_beside_shallow_cut"
+assert_exit "newer parent beside a shallow same-date parent rejects dates" 1 \
+    "$GITCALVER"
 
 new_repo "shallow_second_parent_older_date"
 commit_at "2026-04-08T09:00:00Z" "root, older"
@@ -857,6 +1072,22 @@ commit_at "2026-04-11T00:00:01Z" "just after midnight"
 assert_output "UTC midnight boundary" "20260411.2" \
     "$GITCALVER"
 
+new_repo "same_day_clock_order"
+commit_at "2026-04-09T09:00:00Z" "older"
+commit_at "2026-04-10T10:00:00Z" "later clock"
+commit_at "2026-04-10T09:00:00Z" "earlier clock"
+CLOCK_ORDER_TIP=$(git rev-parse HEAD)
+assert_output "same-day commits out of clock order (forward)" "20260410.2" \
+    "$GITCALVER"
+assert_output "same-day commits out of clock order (reverse)" \
+    "$CLOCK_ORDER_TIP" "$GITCALVER" 20260410.2
+
+new_repo "parent_at_next_midnight"
+commit_at "2026-04-11T00:00:00Z" "next midnight"
+commit_at "2026-04-10T23:00:00Z" "child before midnight"
+assert_exit "parent dated the next UTC midnight is newer" 1 \
+    "$GITCALVER"
+
 # ---- Year boundary ----
 
 new_repo "year_boundary"
@@ -864,6 +1095,17 @@ commit_at "2026-12-31T23:00:00Z" "last-of-year"
 commit_at "2027-01-01T01:00:00Z" "first-of-year"
 assert_output "year boundary" "20270101.1" \
     "$GITCALVER"
+
+for CALENDAR_CASE in 1970-01-01:43200 2000-02-29:951825600 2100-03-01:4107585600; do
+    CALENDAR_DATE=${CALENDAR_CASE%:*}
+    new_repo "calendar_$CALENDAR_DATE"
+    commit_at "@${CALENDAR_CASE#*:} +0000"
+    CALENDAR_VERSION=$(printf '%s.1' "$CALENDAR_DATE" | tr -d -)
+    assert_output "calendar conversion at $CALENDAR_DATE" \
+        "$CALENDAR_VERSION" "$GITCALVER"
+    assert_output "calendar round-trip at $CALENDAR_DATE" \
+        "$(git rev-parse HEAD)" "$GITCALVER" "$CALENDAR_VERSION"
+done
 
 # ---- Strictly increasing ----
 
@@ -920,6 +1162,67 @@ assert_exit "decreasing committer dates" 1 \
     "$GITCALVER"
 assert_exit "reverse lookup validates decreasing date boundary" 1 \
     "$GITCALVER" 20260410.1
+
+new_repo "decreasing_above_target_date"
+commit_at "2026-04-09T09:00:00Z" "older"
+commit_at "2026-04-10T09:00:00Z" "target"
+commit_at "2026-04-16T09:00:00Z" "skewed ahead"
+commit_at "2026-04-13T09:00:00Z" "skewed back"
+commit_at "2026-04-15T09:00:00Z" "tip"
+assert_exit "reverse lookup validates dates newer than the target" 1 \
+    "$GITCALVER" 20260410.1
+
+new_repo "decreasing_above_missing_object"
+commit_at "2026-04-08T09:00:00Z" "root"
+commit_at "2026-04-09T09:00:00Z" "missing older boundary"
+MISSING_REV=$(git rev-parse HEAD)
+commit_at "2026-04-10T09:00:00Z" "target"
+commit_at "2026-04-16T09:00:00Z" "skewed ahead"
+commit_at "2026-04-15T09:00:00Z" "tip"
+remove_object "$MISSING_REV"
+assert_exit "reverse reports backwards dates above a missing object" 1 \
+    "$GITCALVER" 20260410.1
+
+# ---- Malformed commit dates ----
+#
+# Git reads a malformed commit's date (no author line, or digits followed by
+# junk) as 0 or a partial number. Where that reading decides the result, for
+# the target or a commit skipped as older, the result is an error.
+
+MALFORMED_TREE=$(git hash-object -t tree /dev/null)
+for MALFORMED_CASE in no_author partial_digits; do
+    case "$MALFORMED_CASE" in
+    no_author)
+        MALFORMED_HEADER='committer Test <test@test.com> 1775811600 +0000'
+        ;;
+    partial_digits)
+        MALFORMED_HEADER='author Test <test@test.com> 1775811600 +0000
+committer Test <test@test.com> 123foo +0000'
+        ;;
+    esac
+    new_repo "malformed_$MALFORMED_CASE"
+    commit_at "2026-04-09T09:00:00Z" "older"
+    MALFORMED_REV=$(
+        printf 'tree %s\nparent %s\n%s\n\n%s\n' "$MALFORMED_TREE" \
+            "$(git rev-parse HEAD)" "$MALFORMED_HEADER" "$MALFORMED_CASE" |
+            git hash-object -t commit -w --literally --stdin
+    )
+    git update-ref refs/heads/main "$MALFORMED_REV"
+    commit_at "2026-04-10T10:00:00Z" "tip"
+    assert_exit "malformed date skipped as older is an error ($MALFORMED_CASE)" \
+        1 "$GITCALVER"
+    assert_exit "reverse: malformed date skipped as older ($MALFORMED_CASE)" \
+        1 "$GITCALVER" 20260410.1
+done
+
+new_repo "malformed_target"
+MALFORMED_ROOT=$(
+    printf 'tree %s\ncommitter Test <test@test.com> 1775811600 +0000\n\n%s\n' \
+        "$MALFORMED_TREE" "no author" |
+        git hash-object -t commit -w --literally --stdin
+)
+git update-ref refs/heads/main "$MALFORMED_ROOT"
+assert_exit "malformed date on the target is an error" 1 "$GITCALVER"
 
 # ---- Empty commit ----
 
@@ -1006,6 +1309,15 @@ assert_output "detached unpushed selected-branch revision is clean" \
     "20260410.2" \
     "$GITCALVER"
 
+new_repo "annotated_tag_tracking_tip"
+commit_at "2026-04-10T09:00:00Z" "first"
+commit_at "2026-04-10T10:00:00Z" "second"
+git tag -a tracking-tag -m "annotated" HEAD
+git update-ref refs/remotes/origin/main "$(git rev-parse tracking-tag)"
+git branch -m work
+assert_match "tracking ref naming an annotated tag peels to its commit" \
+    '^(20260410\.2|EXIT:4)$' "$GITCALVER"
+
 # ---- Reverse lookup (version → commit) ----
 
 new_repo "find_basic"
@@ -1021,6 +1333,8 @@ assert_output "find: first commit of day" "$HASH1" \
     "$GITCALVER" 20260410.1
 assert_output "find: middle commit of day" "$HASH2" \
     "$GITCALVER" 20260410.2
+assert_exit "find: date before 1970 is not found" 1 \
+    "$GITCALVER" 19691231.1
 assert_output "find: last commit of day" "$HASH3" \
     "$GITCALVER" 20260410.3
 assert_output "find: next day" "$HASH4" \
@@ -1146,7 +1460,7 @@ assert_exit "revision: invalid ref" 1 \
 # A revision that looks like a git option must be rejected outright, never
 # passed through to an inner git command. Without --verify, git rev-parse echoes
 # an unrecognized option-like argument back unchanged and exits 0, so the string
-# would flow into git merge-base/git log as an option (e.g. "git log
+# would flow into git rev-list/git merge-base as an option (e.g. "git rev-list
 # --output=FILE" writes a file). "--" routes the dash-leading token to the
 # positional slot so it actually reaches the revision validation.
 new_repo "rev_option_injection"
@@ -1161,6 +1475,16 @@ if [ -e "$INJECT_FILE" ]; then
 else
     pass "revision: option injection writes no file"
 fi
+
+# An empty directory leaves the workspace clean.
+new_repo "object_id_named_directory"
+commit_at "2026-04-10T09:00:00Z"
+OID_NAMED_DIR=$(git rev-parse HEAD)
+mkdir "$OID_NAMED_DIR"
+assert_output "object-ID-named directory is not a pathspec (forward)" \
+    "20260410.1" "$GITCALVER"
+assert_output "object-ID-named directory is not a pathspec (reverse)" \
+    "$OID_NAMED_DIR" "$GITCALVER" 20260410.1
 
 # ---- Time zone handling ----
 
@@ -1212,6 +1536,58 @@ EXPECTED_HASH=$(git rev-parse HEAD)
 assert_output "N=11 round-trip" "$EXPECTED_HASH" \
     "$GITCALVER" 20260410.11
 
+new_repo "bounded_cohort_reads"
+awk 'BEGIN {
+    for (i = 1; i <= 576; i++) {
+        stamp = i <= 512 ? 1775811600 : 1775898000
+        print "commit refs/heads/main"
+        print "committer Test <test@test.com> " stamp " +0000"
+        print "data 1\nx\n"
+    }
+}' | git fast-import --quiet
+BOUNDED_TIP=$(git rev-parse HEAD)
+LOOKUP_PROBE="$TMPDIR_BASE/lookup-probe"
+mkdir -p "$LOOKUP_PROBE/bin"
+cat >"$LOOKUP_PROBE/bin/git" <<'EOF'
+#!/bin/sh
+set -eu
+PATH=${PATH#*:}
+case " $* " in
+*" rev-list "* | *" log "*)
+    git "$@" >"$LOOKUP_PROBE/out"
+    grep -cE '[0-9a-f]{40}' <"$LOOKUP_PROBE/out" >>"$LOOKUP_PROBE/reads" || :
+    cat "$LOOKUP_PROBE/out"
+    ;;
+*" cat-file --batch "*)
+    tee -a "$LOOKUP_PROBE/requests" | git "$@"
+    ;;
+*) exec git "$@" ;;
+esac
+EOF
+chmod +x "$LOOKUP_PROBE/bin/git"
+for DIRECTION in forward reverse; do
+    : >"$LOOKUP_PROBE/reads"
+    : >"$LOOKUP_PROBE/requests"
+    if [ "$DIRECTION" = forward ]; then
+        LOOKUP_ARG=HEAD
+        LOOKUP_EXPECTED=20260411.64
+    else
+        LOOKUP_ARG=20260411.64
+        LOOKUP_EXPECTED="$BOUNDED_TIP"
+    fi
+    assert_output "$DIRECTION lookup in a long history" "$LOOKUP_EXPECTED" \
+        env PATH="$LOOKUP_PROBE/bin:$PATH" LOOKUP_PROBE="$LOOKUP_PROBE" \
+        "$GITCALVER" "$LOOKUP_ARG"
+    wc -l <"$LOOKUP_PROBE/requests" >>"$LOOKUP_PROBE/reads"
+    OBJECT_READS=$(awk '{ n += $1 } END { print n + 0 }' "$LOOKUP_PROBE/reads")
+    if [ "$OBJECT_READS" -le 160 ]; then
+        pass "$DIRECTION lookup bounds git records to the date cohort"
+    else
+        fail "$DIRECTION lookup bounds git records to the date cohort" \
+            "at most 160 records" "$OBJECT_READS records"
+    fi
+done
+
 # ---- Dirty hash is HEAD, not merge-base ----
 
 new_repo "dirty_hash_is_head"
@@ -1241,6 +1617,22 @@ assert_exit "explicit empty target is not omission" 1 \
     "$GITCALVER" ""
 assert_exit "explicit empty target occupies positional slot" 1 \
     "$GITCALVER" "" HEAD
+
+# ---- Standard input ----
+
+new_repo "stdin_left_unread"
+commit_at "2026-04-10T09:00:00Z"
+for STDIN_ARG in HEAD 20260410.1; do
+    STDIN_LEFT=$(printf 'kept\n' | {
+        "$GITCALVER" "$STDIN_ARG" >/dev/null 2>&1 || true
+        cat
+    })
+    if [ "$STDIN_LEFT" = kept ]; then
+        pass "standard input left unread ($STDIN_ARG)"
+    else
+        fail "standard input left unread ($STDIN_ARG)" "kept" "[$STDIN_LEFT]"
+    fi
+done
 
 # ---- Bare repositories ----
 
