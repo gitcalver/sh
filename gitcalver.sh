@@ -765,6 +765,49 @@ workspace_git() {
         -c status.renames=false "$@"
 }
 
+# --ignore-submodules=none governs only the submodules directly below the
+# repository it is given to, so the check repeats inside every populated
+# submodule. Do not use `git submodule foreach`: it fails on a gitlink that
+# .gitmodules does not map. Like git's own submodule commands, the recursion
+# clears repository variables such as GIT_INDEX_FILE, which a hook may set for
+# the superproject.
+worktree_changes() (
+    changes=$(workspace_git status --porcelain --ignore-submodules=none) ||
+        exit
+    if [ -n "$changes" ]; then
+        printf '%s\n' "$changes"
+        exit 0
+    fi
+    top=$(git rev-parse --show-toplevel) || exit
+    cd "$top" || exit
+    # Git quotes a path containing a control character, quote, or backslash
+    # even with core.quotePath=false; such a gitlink cannot be entered.
+    gitlinks=$({
+        git -c core.quotePath=false ls-files --stage || echo failed
+    } | awk -F '\t' '
+        $0 == "failed" { exit 1 }
+        /^160000 / {
+            if ($2 ~ /^"/) exit 1
+            print $2
+        }
+    ') || exit
+    [ -n "$gitlinks" ] || exit 0
+    for var in $(git rev-parse --local-env-vars); do
+        case "$var" in
+        GIT_CONFIG_PARAMETERS | GIT_CONFIG_COUNT) ;;
+        *) unset "$var" ;;
+        esac
+    done
+    printf '%s\n' "$gitlinks" | while IFS= read -r gitlink; do
+        [ -e "$gitlink/.git" ] || continue
+        changes=$(cd "./$gitlink" && worktree_changes) || exit
+        if [ -n "$changes" ]; then
+            printf '%s\n' "$changes"
+            exit 0
+        fi
+    done
+)
+
 IS_DIRTY=false
 if $OFF_BRANCH; then
     IS_DIRTY=true
@@ -776,14 +819,7 @@ elif ! $TARGET_SET; then
     IS_BARE_REPOSITORY=$(git rev-parse --is-bare-repository) ||
         die "cannot determine whether repository is bare"
     if [ "$IS_BARE_REPOSITORY" = "false" ]; then
-        # --ignore-submodules=none governs only the submodules directly
-        # below the repository it is given to, so status also runs inside
-        # every submodule.
-        WORKTREE_STATUS=$({
-            workspace_git status --porcelain --ignore-submodules=none &&
-                workspace_git submodule --quiet foreach --recursive \
-                    'git status --porcelain --ignore-submodules=none'
-        } 2>/dev/null) ||
+        WORKTREE_STATUS=$(worktree_changes 2>/dev/null) ||
             die "local history cannot prove workspace state" \
                 "$EXIT_INCOMPLETE_HISTORY"
         [ -z "$WORKTREE_STATUS" ] || IS_DIRTY=true

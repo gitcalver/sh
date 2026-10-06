@@ -246,6 +246,56 @@ git -C middle/inner config user.name "Test"
 assert_exit "dirty: moved nested submodule despite its .gitmodules ignore=all" \
     2 "$GITCALVER"
 
+new_repo "deep_leaf_source"
+commit_at "2026-04-10T09:00:00Z"
+new_repo "deep_lower_source"
+git -c protocol.file.allow=always submodule --quiet add \
+    "$TMPDIR_BASE/deep_leaf_source" leaf
+git config -f .gitmodules submodule.leaf.ignore all
+git add .gitmodules
+commit_at "2026-04-10T09:01:00Z" "add leaf"
+new_repo "deep_upper_source"
+git -c protocol.file.allow=always submodule --quiet add \
+    "$TMPDIR_BASE/deep_lower_source" lower
+commit_at "2026-04-10T09:02:00Z" "add lower"
+new_repo "deep_submodules"
+git -c protocol.file.allow=always submodule --quiet add \
+    "$TMPDIR_BASE/deep_upper_source" upper
+git -c protocol.file.allow=always submodule --quiet update --init --recursive
+commit_at "2026-04-10T09:03:00Z" "add upper"
+DEEP_INDEX="$PWD/.git/index"
+assert_output "clean: submodule check ignores the superproject's GIT_INDEX_FILE" \
+    "20260410.1" env GIT_INDEX_FILE="$DEEP_INDEX" "$GITCALVER"
+git -C upper/lower/leaf config user.email "test@test.com"
+git -C upper/lower/leaf config user.name "Test"
+(cd upper/lower/leaf && commit_at "2026-04-10T09:04:00Z" "move leaf")
+assert_exit "dirty: moved submodule three levels down despite ignore=all" 2 \
+    "$GITCALVER"
+
+# A repository added with plain `git add` is a gitlink that .gitmodules does
+# not map; git status still proves whether it changed.
+new_repo "unmapped_gitlink"
+git init --quiet -b main embedded
+git -C embedded config user.email "test@test.com"
+git -C embedded config user.name "Test"
+(cd embedded && commit_at "2026-04-10T09:00:00Z" "embedded")
+git add embedded 2>/dev/null
+commit_at "2026-04-10T09:01:00Z" "add embedded repository"
+assert_output "clean: gitlink without a .gitmodules entry" "20260410.1" \
+    "$GITCALVER"
+echo "new" >embedded/untracked.txt
+assert_exit "dirty: untracked file in a gitlink without .gitmodules entry" 2 \
+    "$GITCALVER"
+rm embedded/untracked.txt
+(cd embedded && commit_at "2026-04-10T09:02:00Z" "move embedded")
+assert_exit "dirty: moved gitlink without a .gitmodules entry" 2 \
+    "$GITCALVER"
+git clone --quiet "$TMPDIR_BASE/unmapped_gitlink" \
+    "$TMPDIR_BASE/unmapped_gitlink_clone"
+cd "$TMPDIR_BASE/unmapped_gitlink_clone"
+assert_output "clean: unpopulated gitlink without a .gitmodules entry" \
+    "20260410.1" "$GITCALVER"
+
 new_repo "clean_gitignored"
 commit_at "2026-04-10T09:00:00Z"
 echo "ignored.txt" >.gitignore
