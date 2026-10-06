@@ -171,17 +171,22 @@ esac
 # Version calculation is local-only. In a partial clone, missing objects must
 # produce the incomplete-history result instead of implicitly contacting a
 # promisor remote. Replacement refs are also excluded so every invocation sees
-# the repository's actual object graph. Git must also use the shallow and graft
-# files checked below, and honor core.commitGraph=false.
+# the repository's actual object graph. Git must also use the repository's
+# shallow and graft files and honor core.commitGraph=false.
 GIT_NO_LAZY_FETCH=1
 GIT_NO_REPLACE_OBJECTS=1
 export GIT_NO_LAZY_FETCH GIT_NO_REPLACE_OBJECTS
 unset GIT_SHALLOW_FILE GIT_GRAFT_FILE GIT_TEST_COMMIT_GRAPH
 
+# Commit objects and paths can hold bytes that are invalid in the caller's
+# locale, and some awks abort on such bytes in a multibyte locale.
+LC_ALL=C
+export LC_ALL
+
 # --- Verify git repository ---
 
 # Resolve repository metadata through the common directory so linked worktrees
-# see the same shallow boundary and deprecated graft file as the main worktree.
+# see the same deprecated graft file as the main worktree.
 GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null) ||
     die "not a git repository"
 case "$GIT_COMMON_DIR" in
@@ -192,7 +197,6 @@ case "$GIT_COMMON_DIR" in
     ;;
 esac
 
-SHALLOW_FILE="$GIT_COMMON_DIR/shallow"
 GRAFT_FILE="$GIT_COMMON_DIR/info/grafts"
 
 if [ -e "$GRAFT_FILE" ]; then
@@ -261,40 +265,46 @@ resolve_branch_tip() (
         git rev-parse --verify "refs/remotes/$REMOTE/$branch" 2>/dev/null
 )
 
+# The commit-graph lets git walk past commits whose objects are missing, so
+# every walk reads each commit from its object instead.
+rev_list() {
+    git -c core.commitGraph=false rev-list "$@" -- 2>/dev/null
+}
+
 # A commit that a bulk Git traversal treated as parentless is a genuine root
 # only if its stored object is present locally and lists no parent; a missing
 # object or a stored parent means the traversal stopped at a shallow or
-# partial-clone cut instead. Used only after a traversal has stopped; never
-# called once per commit.
-is_genuine_root() (
-    commit_object=$(git cat-file commit "$1" 2>/dev/null) || exit 1
-    # Anchor to the start of the line: header continuation lines (gpgsig,
-    # mergetag) begin with a single space that awk's default field splitting
-    # strips, so an unanchored $1 == "parent" would take a continuation line
-    # whose text starts with that word for a real parent header and
-    # misclassify a genuine root as incomplete history.
-    printf '%s\n' "$commit_object" |
-        awk '/^$/ { exit 0 } /^parent / { exit 1 }'
+# partial-clone cut instead. Checks every commit in the whitespace-separated
+# list $1 with one git process. --pretty=raw prints the stored headers and
+# indents the message; --encoding=none keeps git from re-encoding a commit
+# that declares an encoding such as UTF-16, which would garble its parent
+# lines. Anchor the match to the start of the line: header continuation lines
+# (gpgsig, mergetag) begin with a single space, and one whose text starts with
+# "parent" is not a parent header.
+all_genuine_roots() (
+    [ -n "$1" ] || exit 0
+    # shellcheck disable=SC2086 # Object IDs split on whitespace.
+    printf '%s\n' $1 | {
+        rev_list --no-walk --stdin --encoding=none --pretty=raw && echo ok
+    } | awk '/^parent / { bad = 1 } $0 == "ok" { ok = 1 } END { exit bad || !ok }'
 )
 
-# A negative reachability result is conclusive only when the target's known
-# ancestry did not stop at a shallow boundary and did not encounter a missing
-# promised commit.
-history_is_complete() (
-    git rev-list "$1" -- >/dev/null 2>&1 || exit "$EXIT_INCOMPLETE_HISTORY"
-    [ -f "$SHALLOW_FILE" ] || exit 0
-
-    while IFS= read -r boundary; do
-        [ -n "$boundary" ] || continue
-        if git merge-base --is-ancestor "$boundary" "$1" 2>/dev/null; then
-            is_genuine_root "$boundary" ||
-                exit "$EXIT_INCOMPLETE_HISTORY"
-        else
-            ancestor_status=$?
-            [ "$ancestor_status" -eq 1 ] ||
-                exit "$EXIT_INCOMPLETE_HISTORY"
-        fi
-    done <"$SHALLOW_FILE"
+# Succeeds when commit $1 reaches every commit in the whitespace-separated
+# list $2. A walk without exclusions lists a commit's whole ancestry whatever
+# the dates.
+reaches_all() (
+    # shellcheck disable=SC2086 # Object IDs split on whitespace.
+    {
+        printf '%s\n' $2 ""
+        rev_list "$1"
+    } | awk '
+        !walk {
+            if ($0 == "") walk = 1
+            else if (!($1 in want)) { want[$1] = 1; left++ }
+            next
+        }
+        ($1 in want) && --left == 0 { found = 1; exit }
+        END { exit !found }'
 )
 
 # Find the newest selected-chain commit reachable from an off-chain target.
@@ -304,36 +314,75 @@ find_reachable_branch_anchor() (
     rev="$1"
     branch_tip="$2"
 
-    # Excluding rev removes its full ancestry from the selected first-parent
-    # walk. The oldest remaining commit is therefore the child of the newest
-    # reachable anchor. If nothing remains, the selected tip itself is
-    # reachable. A root with no first parent means the histories do not meet.
-    unreachable_count=$(git rev-list --count --first-parent \
-        "$branch_tip" "^$rev" -- 2>/dev/null) ||
-        exit "$EXIT_INCOMPLETE_HISTORY"
-    if [ "$unreachable_count" -eq 0 ]; then
+    # Excluding rev lists the chain down to a candidate that rev reaches. The
+    # candidate is not the anchor: git's limited walk stops marking rev's
+    # ancestry early under date skew and skips its missing commits, so it can
+    # still list newer chain commits that rev reaches. The listing runs from
+    # the tip along first parents; the candidate is the first parent of the
+    # last commit listed, and is empty when that commit has no parent.
+    links=$({
+        rev_list --first-parent --parents "$branch_tip" "^$rev" && echo ok
+    } | awk -v rev="$rev" '
+        $0 == "ok" { ok = 1; next }
+        { last = $1; candidate = $2; chain[++n] = $1 }
+        END {
+            if (!ok) exit 1
+            if (!n) exit
+            print last, candidate
+            if (candidate == rev "") exit
+            for (i = 1; i <= n; i++) print chain[i]
+        }') || exit "$EXIT_INCOMPLETE_HISTORY"
+    if [ -z "$links" ]; then
         printf '%s\n' "$branch_tip"
         exit 0
     fi
-
-    if anchor=$(git rev-parse --verify \
-        "$branch_tip~$unreachable_count^{commit}" 2>/dev/null); then
-        printf '%s\n' "$anchor"
+    read -r last candidate <<EOF
+$links
+EOF
+    if [ "$candidate" = "$rev" ]; then
+        printf '%s\n' "$rev"
         exit 0
     fi
 
-    # The selected walk either reached a real root or stopped at incomplete
-    # history. Inspect only its last known commit to distinguish those cases.
-    last_index=$((unreachable_count - 1))
-    last_unreachable=$(git rev-parse --verify \
-        "$branch_tip~$last_index^{commit}" 2>/dev/null) ||
+    # Every listed chain commit is outside the candidate's ancestry. This walk
+    # lists all of rev's ancestry outside it whatever the dates, and fails on
+    # a missing commit there, so rev reaches a listed chain commit exactly
+    # when the walk lists it. Git lists a commit only once it has read the
+    # commit's parents, so a listed tip is the anchor even if the walk fails
+    # later. Commits without parents are roots or shallow cuts; behind a cut
+    # rev could reach a chain commit newer than the anchor, unless the anchor
+    # itself reaches the cut.
+    result=$({
+        printf '%s\n' "$links" ""
+        rev_list --parents "$rev" ${candidate:+"^$candidate"} && echo ok
+    } | awk -v candidate="$candidate" -v last="$last" '
+        NR == 1 { next }
+        !walk {
+            if ($0 == "") walk = 1
+            else position[$1] = NR - 1
+            next
+        }
+        $0 == "ok" { ok = 1; next }
+        ($1 in position) && (!best || position[$1] < best) {
+            best = position[$1]
+            anchor = $1
+        }
+        NF == 1 { roots = roots " " $1 }
+        END {
+            if (best == 1) print "anchor", anchor
+            else if (!ok) exit 1
+            else if (best) print "anchor", anchor roots
+            else if (candidate != "") print "anchor", candidate roots
+            else print "unrelated -", last roots
+        }') || exit "$EXIT_INCOMPLETE_HISTORY"
+    read -r state anchor roots <<EOF
+$result
+EOF
+    all_genuine_roots "$roots" ||
+        { [ "$state" = anchor ] && reaches_all "$anchor" "$roots"; } ||
         exit "$EXIT_INCOMPLETE_HISTORY"
-    is_genuine_root "$last_unreachable" || exit "$EXIT_INCOMPLETE_HISTORY"
-
-    # The selected walk reached a real root. The histories are conclusively
-    # unrelated only if the target walk is complete as well.
-    history_is_complete "$rev" || exit "$EXIT_INCOMPLETE_HISTORY"
-    exit "$EXIT_NOT_TRACEABLE"
+    [ "$state" = anchor ] || exit "$EXIT_NOT_TRACEABLE"
+    printf '%s\n' "$anchor"
 )
 
 # Howard Hinnant's civil_from_days. A timestamp too large for shell arithmetic
@@ -383,16 +432,13 @@ die_unprovable() {
 # each commit older than --since without queueing its parents, so the only
 # older commits it reads are those that bound the walk. Do not add a
 # ^exclusion or an ordering option: either switches git to a limited walk,
-# which hides a same-date commit that is also behind an older one. The
-# commit-graph lets git walk past commits whose objects are missing, so every
-# commit is read from its object instead. --since=@<epoch> +0000 is parsed
-# exactly; git before 2.43.1 reads --max-age with atoi, which overflows after
-# January 2038.
+# which hides a same-date commit that is also behind an older one.
+# --since=@<epoch> +0000 is parsed exactly; git before 2.43.1 reads --max-age
+# with atoi, which overflows after January 2038.
 date_walk() (
     since=$1
     shift
-    git -c core.commitGraph=false rev-list --timestamp --parents \
-        --since="@$since +0000" "$@" -- 2>/dev/null
+    rev_list --timestamp --parents --since="@$since +0000" "$@"
 )
 
 boundary_oids() {
@@ -405,8 +451,8 @@ boundary_oids() {
 # walk skipped, must read the same through %ct, from its committer line.
 check_dates() (
     [ -n "$1" ] || exit 0
-    listing=$(printf '%s\n' "$1" | git -c core.commitGraph=false rev-list \
-        --no-walk --stdin --timestamp --format='date %ct' -- 2>/dev/null) ||
+    listing=$(printf '%s\n' "$1" |
+        rev_list --no-walk --stdin --timestamp --format='date %ct') ||
         die_unprovable
     bad=$(printf '%s\n' "$listing" | awk '
         $2 == "commit" && oid == "" {
@@ -435,7 +481,7 @@ count_cohorts() (
     # Git lists a shallow cut as parentless, like a root.
     cuts=$(printf '%s\n' "$1" | awk 'NF == 2 && $2 !~ /^-/ { print $2 }' |
         while IFS= read -r oid; do
-            is_genuine_root "$oid" || printf 'cut %s\n' "$oid"
+            all_genuine_roots "$oid" || printf 'cut %s\n' "$oid"
         done)
     result=$({
         printf '%s\n' "$4" | sed 's/^/member /'
@@ -576,7 +622,7 @@ EOF
     read -r _ root skipped total <<EOF
 $block
 EOF
-    [ "$root" = - ] || is_genuine_root "$root" || die_unprovable
+    [ "$root" = - ] || all_genuine_roots "$root" || die_unprovable
     if [ "$total" -eq 0 ]; then
         [ "$skipped" = - ] || check_dates "$skipped" || exit $?
         die "version not found: $POSITIONAL"
@@ -714,8 +760,8 @@ if $TARGET_SET; then
     # --verify is required for safety: without it, git rev-parse echoes an
     # unrecognized option-like argument (e.g. "-foo") back unchanged and exits
     # 0, so the "validation" would pass and the attacker-controlled string would
-    # flow on into git rev-list/git merge-base as an option. --verify forces a
-    # single resolved revision and rejects anything that is not one.
+    # flow on into git rev-list as an option. --verify forces a single resolved
+    # revision and rejects anything that is not one.
     if REV=$(git rev-parse --verify "$POSITIONAL^{commit}" 2>/dev/null); then
         :
     elif RESOLVED_REV=$(git rev-parse --verify "$POSITIONAL" 2>/dev/null) &&

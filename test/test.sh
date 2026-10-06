@@ -739,6 +739,25 @@ printf '%s\n' "$(git rev-parse HEAD)" >"$GRAFT_PATH"
 assert_exit "legacy graft file returns incomplete history" 4 \
     "$GITCALVER"
 
+# Some awks abort on bytes that are invalid in a multibyte locale.
+new_repo "non_utf8_root"
+EMPTY_TREE=$(git hash-object -w -t tree /dev/null)
+NON_UTF8_ROOT=$(
+    {
+        printf 'tree %s\n' "$EMPTY_TREE"
+        printf 'author Ren\351 <test@test.com> 1775811600 +0000\n'
+        printf 'committer Ren\351 <test@test.com> 1775811600 +0000\n\n'
+        printf 'caf\351\n'
+    } | git hash-object -w -t commit --stdin
+)
+git update-ref refs/heads/main "$NON_UTF8_ROOT"
+assert_output "non-UTF-8 root is genuine" "20260410.1" \
+    env LC_ALL=en_US.UTF-8 "$GITCALVER" main
+git checkout --orphan other --quiet
+commit_at "2026-04-10T10:00:00Z" "orphan"
+assert_exit "non-UTF-8 root still proves unrelated history" 3 \
+    env LC_ALL=en_US.UTF-8 "$GITCALVER" --branch main
+
 # Header continuation lines (gpgsig, mergetag, any multi-line header) begin
 # with one space. One whose own text is the word "parent" is signature or
 # message content, not a parent header, so a genuine root carrying it must
@@ -923,6 +942,256 @@ git checkout main --quiet
 assert_output "off-chain target uses newest reachable branch anchor" \
     "20260411.2-dirty.${FEATURE_MERGE_SHORT}" \
     "$GITCALVER" --dirty "-dirty" "$FEATURE_MERGE"
+
+# ---- Branch anchor proof ----
+#
+# The anchor is the newest selected-chain commit the target reaches through any
+# parent path, whatever the committer dates. A commit missing from the target's
+# side, or cut there by a shallow boundary, can hide a newer one.
+
+new_repo "skewed_merge_anchor"
+for day in 10 11 12 13 14 15; do
+    commit_at "2026-04-${day}T09:00:00Z" "c$((day - 10))"
+done
+git checkout -b feature --quiet
+commit_at "2026-04-15T10:00:00Z" "f1"
+# The merge is dated before main's root and also reaches c4 directly.
+SKEWED_MERGE=$(GIT_COMMITTER_DATE="2026-04-01T09:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-01T09:00:00Z" \
+    git commit-tree -p HEAD -p main~1 -m "merge c4" "HEAD^{tree}")
+git reset --quiet --hard "$SKEWED_MERGE"
+assert_output "skewed merge anchors at the newest reachable branch commit" \
+    "20260415.1-dirty.$(printf '%.7s' "$SKEWED_MERGE")" \
+    "$GITCALVER" --dirty "-dirty"
+assert_output "skewed merge leaves an on-chain target clean" "20260414.1" \
+    "$GITCALVER" main~1
+
+new_repo "older_than_root_above_tip"
+commit_at "2026-04-10T09:00:00Z" "c0"
+commit_at "2026-04-11T09:00:00Z" "c1"
+commit_at "2026-04-12T09:00:00Z" "c2"
+git checkout -b feature --quiet
+commit_at "2026-04-12T10:00:00Z" "f1"
+for i in 1 2 3 4 5 6 7; do
+    commit_at "2001-01-01T00:0${i}:00Z" "older than main's root"
+done
+commit_at "2026-04-12T11:00:00Z" "head"
+assert_output "commits older than main's root do not hide the tip anchor" \
+    "20260412.1-dirty.$(git rev-parse HEAD | cut -c1-7)" \
+    "$GITCALVER" --dirty "-dirty"
+
+new_repo "older_than_root_below_tip"
+for day in 10 11 12 13; do
+    commit_at "2026-04-${day}T09:00:00Z" "c$((day - 10))"
+done
+git checkout -b feature main~1 --quiet
+commit_at "2026-04-12T10:00:00Z" "f1"
+for i in 1 2 3 4 5 6 7; do
+    commit_at "2001-01-01T00:0${i}:00Z" "older than main's root"
+done
+commit_at "2026-04-12T11:00:00Z" "head"
+assert_output "commits older than main's root do not hide an older anchor" \
+    "20260412.1-dirty.$(git rev-parse HEAD | cut -c1-7)" \
+    "$GITCALVER" --dirty "-dirty"
+
+new_repo "skewed_side_merges_newer_anchor"
+for day in 10 11 12 13 14 15; do
+    commit_at "2026-04-${day}T09:00:00Z" "c$((day - 10))"
+done
+git checkout -b side main~1 --quiet
+for i in 1 2 3 4 5 6 7; do
+    commit_at "2001-01-01T00:0${i}:00Z" "older than main's root"
+done
+git checkout -b feature main~4 --quiet
+commit_at "2026-04-15T10:00:00Z" "f1"
+GIT_COMMITTER_DATE="2026-04-15T11:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-15T11:00:00Z" \
+    git merge side --no-ff -m "merge side" --quiet
+assert_output "skewed side branch merges in a newer anchor" \
+    "20260414.1-dirty.$(git rev-parse HEAD | cut -c1-7)" \
+    "$GITCALVER" --dirty "-dirty"
+
+new_repo "missing_commit_below_anchor"
+for day in 10 11 12 13 14 15; do
+    commit_at "2026-04-${day}T09:00:00Z" "c$((day - 10))"
+done
+MISSING_REV=$(git rev-parse main~5)
+git checkout -b feature main~2 --quiet
+commit_at "2026-04-15T10:00:00Z" "f1"
+remove_object "$MISSING_REV"
+assert_output "missing commit reached only through the anchor does not block it" \
+    "20260413.1-dirty.$(git rev-parse HEAD | cut -c1-7)" \
+    "$GITCALVER" --dirty "-dirty"
+
+new_repo "missing_side_commit_hides_anchor"
+for day in 10 11 12 13 14 15; do
+    commit_at "2026-04-${day}T09:00:00Z" "c$((day - 10))"
+done
+git checkout -b feature --quiet
+commit_at "2026-04-15T10:00:00Z" "f1"
+MISSING_REV=$(git rev-parse HEAD)
+commit_at "2026-04-15T11:00:00Z" "f2"
+SIDE_MERGE=$(GIT_COMMITTER_DATE="2026-04-15T12:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-15T12:00:00Z" \
+    git commit-tree -p HEAD -p main~1 -m "merge c4" "HEAD^{tree}")
+git reset --quiet --hard "$SIDE_MERGE"
+remove_object "$MISSING_REV"
+assert_exit "missing side commit cannot prove the branch anchor" 4 \
+    "$GITCALVER" --dirty "-dirty"
+
+new_repo "commit_graph_missing_side_commit"
+for day in 10 11 12 13 14 15; do
+    commit_at "2026-04-${day}T09:00:00Z" "c$((day - 10))"
+done
+git checkout -b feature --quiet
+commit_at "2026-04-15T10:00:00Z" "f1"
+MISSING_REV=$(git rev-parse HEAD)
+commit_at "2026-04-15T11:00:00Z" "f2"
+git commit-graph write --reachable
+remove_object "$MISSING_REV"
+assert_exit "commit-graph does not stand in for a missing side commit" 4 \
+    "$GITCALVER" --dirty "-dirty"
+
+new_repo "commit_graph_missing_unrelated_commit"
+commit_at "2026-04-10T09:00:00Z" "main"
+git checkout --orphan other --quiet
+commit_at "2026-04-11T09:00:00Z" "o1"
+MISSING_REV=$(git rev-parse HEAD)
+commit_at "2026-04-11T10:00:00Z" "o2"
+git commit-graph write --reachable
+remove_object "$MISSING_REV"
+assert_exit "commit-graph does not prove unrelated history" 4 \
+    "$GITCALVER" --branch main
+
+new_repo "shallow_side_source"
+for day in 10 11 12 13 14 15; do
+    commit_at "2026-04-${day}T09:00:00Z" "c$((day - 10))"
+done
+git checkout -b feature --quiet
+commit_at "2026-04-15T10:00:00Z" "f1"
+commit_at "2026-04-15T11:00:00Z" "f2"
+SHALLOW_MERGE=$(GIT_COMMITTER_DATE="2026-04-15T12:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-15T12:00:00Z" \
+    git commit-tree -p HEAD -p main~1 -m "merge c4" "HEAD^{tree}")
+git reset --quiet --hard "$SHALLOW_MERGE"
+git checkout main --quiet
+# Depth 3 makes f1 a shallow cut, hiding its parent, the tip c5.
+git clone --depth 3 --no-single-branch \
+    "file://$TMPDIR_BASE/shallow_side_source" \
+    "$TMPDIR_BASE/shallow_side_clone" --quiet
+cd "$TMPDIR_BASE/shallow_side_clone"
+assert_match "shallow side cut cannot hide a newer branch anchor" \
+    "^(20260415\\.1-dirty\\.$(printf '%.7s' "$SHALLOW_MERGE")|EXIT:4)\$" \
+    "$GITCALVER" --dirty "-dirty" "$SHALLOW_MERGE"
+
+new_repo "shallow_anchor_source"
+for day in 10 11 12 13 14 15; do
+    commit_at "2026-04-${day}T09:00:00Z" "c$((day - 10))"
+done
+git checkout -b feature main~2 --quiet
+commit_at "2026-04-15T10:00:00Z" "f1"
+SHALLOW_ANCHOR_FEATURE=$(git rev-parse HEAD)
+git checkout main --quiet
+git clone --depth 4 --no-single-branch \
+    "file://$TMPDIR_BASE/shallow_anchor_source" \
+    "$TMPDIR_BASE/shallow_anchor_clone" --quiet
+cd "$TMPDIR_BASE/shallow_anchor_clone"
+assert_output "shallow cut below the anchor does not block it" \
+    "20260413.1-dirty.$(printf '%.7s' "$SHALLOW_ANCHOR_FEATURE")" \
+    "$GITCALVER" --dirty "-dirty" "$SHALLOW_ANCHOR_FEATURE"
+
+# Git re-encodes a commit that declares UTF-16 to display it, which garbles
+# the headers of an even-length object. f1 declares it.
+new_repo "encoded_cut_source"
+for day in 10 11 12 13 14 15; do
+    commit_at "2026-04-${day}T09:00:00Z" "c$((day - 10))"
+done
+git checkout -b feature --quiet
+ENCODED_BODY=$(
+    printf 'tree %s\nparent %s\n' "$(git rev-parse 'HEAD^{tree}')" \
+        "$(git rev-parse HEAD)"
+    printf 'author Test <test@test.com> 1776247200 +0000\n'
+    printf 'committer Test <test@test.com> 1776247200 +0000\n'
+    printf 'encoding UTF-16\n\nf1'
+)
+[ $(($(printf '%s\n' "$ENCODED_BODY" | wc -c) % 2)) -eq 0 ] ||
+    ENCODED_BODY="${ENCODED_BODY}x"
+ENCODED_CUT=$(printf '%s\n' "$ENCODED_BODY" |
+    git hash-object -w -t commit --stdin)
+git reset --quiet --hard "$ENCODED_CUT"
+commit_at "2026-04-15T11:00:00Z" "f2"
+ENCODED_MERGE=$(GIT_COMMITTER_DATE="2026-04-15T12:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-15T12:00:00Z" \
+    git commit-tree -p HEAD -p main~1 -m "merge c4" "HEAD^{tree}")
+git reset --quiet --hard "$ENCODED_MERGE"
+git checkout main --quiet
+git clone --depth 3 --no-single-branch \
+    "file://$TMPDIR_BASE/encoded_cut_source" \
+    "$TMPDIR_BASE/encoded_cut_clone" --quiet
+cd "$TMPDIR_BASE/encoded_cut_clone"
+assert_match "shallow side cut declaring UTF-16 cannot hide a newer anchor" \
+    "^(20260415\\.1-dirty\\.$(printf '%.7s' "$ENCODED_MERGE")|EXIT:4)\$" \
+    "$GITCALVER" --dirty "-dirty" "$ENCODED_MERGE"
+
+# The seven 2001 commits stop the walk from main before it reaches f1, and
+# the walk from the target lists the tip before it reaches the missing s1.
+new_repo "listed_tip_despite_missing_commit"
+commit_at "2026-04-10T09:00:00Z" "c0"
+commit_at "2026-04-11T09:00:00Z" "c1"
+commit_at "2026-04-12T09:00:00Z" "c2"
+git checkout --orphan side --quiet
+commit_at "2000-01-01T00:01:00Z" "s1"
+MISSING_REV=$(git rev-parse HEAD)
+commit_at "2000-01-01T00:02:00Z" "s2"
+git checkout -b feature main --quiet
+commit_at "2026-04-12T10:00:00Z" "f1"
+for i in 1 2 3 4 5 6 7; do
+    commit_at "2001-01-01T00:0${i}:00Z" "older than main's root"
+done
+LISTED_TIP_MERGE=$(GIT_COMMITTER_DATE="2026-04-12T11:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-12T11:00:00Z" \
+    git commit-tree -p HEAD -p side -m "merge side" "HEAD^{tree}")
+git reset --quiet --hard "$LISTED_TIP_MERGE"
+remove_object "$MISSING_REV"
+assert_output "missing commit behind the target cannot hide a listed tip" \
+    "20260412.1-dirty.$(printf '%.7s' "$LISTED_TIP_MERGE")" \
+    "$GITCALVER" --dirty "-dirty"
+
+# The seven commits dated before z make the walk from the merge stop before
+# it marks z as an ancestor of c, so z is listed as a parentless commit.
+new_repo "cut_in_anchor_ancestry"
+commit_at "2026-04-01T09:00:00Z" "m0"
+commit_at "2026-04-02T09:00:00Z" "m1"
+commit_at "2026-04-20T09:00:00Z" "z"
+ANCESTRY_CUT=$(git rev-parse HEAD)
+for day in 03 04 05 06 07 08 09; do
+    commit_at "2026-04-${day}T09:00:00Z" "older than z"
+done
+commit_at "2026-04-21T09:00:00Z" "c"
+commit_at "2026-04-22T09:00:00Z" "tip"
+git checkout -b feature "$ANCESTRY_CUT" --quiet
+commit_at "2026-04-20T10:00:00Z" "f1"
+ANCESTRY_MERGE=$(GIT_COMMITTER_DATE="2026-04-21T10:00:00Z" \
+    GIT_AUTHOR_DATE="2026-04-21T10:00:00Z" \
+    git commit-tree -p HEAD -p main~1 -m "merge c" "HEAD^{tree}")
+git reset --quiet --hard "$ANCESTRY_MERGE"
+git checkout main --quiet
+printf '%s\n' "$ANCESTRY_CUT" >"$(git rev-parse --git-dir)/shallow"
+assert_output "shallow cut in the anchor's own ancestry does not block it" \
+    "20260421.1-dirty.$(printf '%.7s' "$ANCESTRY_MERGE")" \
+    "$GITCALVER" --dirty "-dirty" "$ANCESTRY_MERGE"
+
+new_repo "commit_graph_missing_branch_commit"
+commit_at "2026-04-10T09:00:00Z" "c0"
+commit_at "2026-04-11T09:00:00Z" "c1"
+MISSING_REV=$(git rev-parse HEAD)
+commit_at "2026-04-12T09:00:00Z" "c2"
+git checkout --orphan other --quiet
+commit_at "2026-04-12T10:00:00Z" "o1"
+git commit-graph write --reachable
+remove_object "$MISSING_REV"
+assert_exit "commit-graph does not stand in for a missing branch commit" 4 \
+    "$GITCALVER" --branch main
 
 # ---- Pruned-walk cohort counting ----
 #
@@ -1585,8 +1854,8 @@ assert_exit "revision: invalid ref" 1 \
 # A revision that looks like a git option must be rejected outright, never
 # passed through to an inner git command. Without --verify, git rev-parse echoes
 # an unrecognized option-like argument back unchanged and exits 0, so the string
-# would flow into git rev-list/git merge-base as an option (e.g. "git rev-list
-# --output=FILE" writes a file). "--" routes the dash-leading token to the
+# would flow into git rev-list as an option (e.g. "git rev-list --output=FILE"
+# writes a file). "--" routes the dash-leading token to the
 # positional slot so it actually reaches the revision validation.
 new_repo "rev_option_injection"
 commit_at "2026-04-10T09:00:00Z"
