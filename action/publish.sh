@@ -44,7 +44,13 @@ parse_version_core() {
 }
 
 commit_utc_date() {
-    TZ=UTC git show -s --format=%cd --date=format-local:%Y%m%d "$1"
+    # --no-show-signature and --encoding keep user configuration
+    # (log.showSignature, i18n.logOutputEncoding or i18n.commitEncoding) from
+    # adding verification text to the date or re-encoding it; both flags beat
+    # config. The trailing -- keeps a file named like the commit from making it
+    # ambiguous.
+    TZ=UTC git show -s --no-show-signature --encoding=UTF-8 --format=%cd \
+        --date=format-local:%Y%m%d "$1" --
 }
 
 version_is_greater() {

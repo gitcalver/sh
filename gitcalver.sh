@@ -279,7 +279,7 @@ is_genuine_root() (
 # ancestry did not stop at a shallow boundary and did not encounter a missing
 # promised commit.
 history_is_complete() (
-    git rev-list "$1" >/dev/null 2>&1 || exit "$EXIT_INCOMPLETE_HISTORY"
+    git rev-list "$1" -- >/dev/null 2>&1 || exit "$EXIT_INCOMPLETE_HISTORY"
     [ -f "$SHALLOW_FILE" ] || exit 0
 
     while IFS= read -r boundary; do
@@ -307,7 +307,7 @@ find_reachable_branch_anchor() (
     # reachable anchor. If nothing remains, the selected tip itself is
     # reachable. A root with no first parent means the histories do not meet.
     unreachable_count=$(git rev-list --count --first-parent \
-        "$branch_tip" "^$rev" 2>/dev/null) ||
+        "$branch_tip" "^$rev" -- 2>/dev/null) ||
         exit "$EXIT_INCOMPLETE_HISTORY"
     if [ "$unreachable_count" -eq 0 ]; then
         printf '%s\n' "$branch_tip"
@@ -334,6 +334,17 @@ find_reachable_branch_anchor() (
     exit "$EXIT_NOT_TRACEABLE"
 )
 
+# Run git log with %cd as the UTC YYYYMMDD committer date; the revision is the
+# last argument. --no-show-signature and --encoding keep user configuration
+# (log.showSignature, i18n.logOutputEncoding or i18n.commitEncoding) from
+# adding verification text to the stream or re-encoding it; both flags beat
+# config. The trailing -- keeps a file named like the revision from making it
+# ambiguous.
+utc_date_log() {
+    TZ=UTC git log --no-show-signature --encoding=UTF-8 \
+        --date=format-local:'%Y%m%d' "$@" --
+}
+
 # Compute REV's UTC committer date and the size of its date cohort: the
 # commits reachable from REV through any parent, visiting each one once,
 # where a same-date commit is counted and its parents explored; a strictly
@@ -353,8 +364,7 @@ compute_version_fields() (
     # index the dump's %H fields directly as the walk's starting node.
     rev="$1"
 
-    dump=$(TZ=UTC git log "$rev" --format='%H%x09%P%x09%cd' \
-        --date=format-local:'%Y%m%d' 2>/dev/null) ||
+    dump=$(utc_date_log --format='%H%x09%P%x09%cd' "$rev" 2>/dev/null) ||
         die "local history cannot prove the target's date cohort" \
             "$EXIT_INCOMPLETE_HISTORY"
 
@@ -513,8 +523,8 @@ find_version_commit() (
     # position within this first-parent block. It emits the full block
     # instead (newest to oldest, matching the order commits are
     # encountered), for the per-member scan below.
-    result=$(TZ=UTC git log "$branch_tip" --first-parent \
-        --format='%H%x09%cd' --date=format-local:'%Y%m%d' 2>/dev/null |
+    result=$(utc_date_log --first-parent --format='%H%x09%cd' \
+        "$branch_tip" 2>/dev/null |
         awk -F '\t' -v td="$target_date" '
             NR > 1 && ($2 + 0) > (newer + 0) {
                 print "decreasing", $2, newer
@@ -691,7 +701,11 @@ elif ! $TARGET_SET; then
     IS_BARE_REPOSITORY=$(git rev-parse --is-bare-repository) ||
         die "cannot determine whether repository is bare"
     if [ "$IS_BARE_REPOSITORY" = "false" ]; then
-        WORKTREE_STATUS=$(git status --porcelain 2>/dev/null) ||
+        # status.showUntrackedFiles=no would otherwise hide untracked files,
+        # including those in submodules, whose status reads the key too. -c
+        # reaches both; --untracked-files reaches only this repository.
+        WORKTREE_STATUS=$(git -c status.showUntrackedFiles=normal status \
+            --porcelain 2>/dev/null) ||
             die "local history cannot prove workspace state" \
                 "$EXIT_INCOMPLETE_HISTORY"
         [ -z "$WORKTREE_STATUS" ] || IS_DIRTY=true

@@ -74,9 +74,10 @@ e.g.:
 ### Dirty workspace
 
 By default, gitcalver exits with status 2 if the workspace has uncommitted
-changes. Use `--dirty STRING` to produce a version instead; the output will
-include the given string and a short commit hash
-(e.g. `--dirty "-dirty"` produces `20260411.3-dirty.abc1234`). The hash is
+changes. Untracked files that are not gitignored count as changes whatever
+`status.showUntrackedFiles` is set to. Use `--dirty STRING` to produce a
+version instead; the output will include the given string and a short commit
+hash (e.g. `--dirty "-dirty"` produces `20260411.3-dirty.abc1234`). The hash is
 always the first seven lowercase characters of the target object ID, regardless
 of Git abbreviation settings or other objects in the repository.
 
@@ -124,7 +125,9 @@ before retrying.
 
 Missing trees and blobs do not affect calculation. Replacement refs are
 ignored, and repositories with a legacy `info/grafts` file are rejected because
-those mechanisms rewrite commit ancestry.
+those mechanisms rewrite commit ancestry. The `git log` output gitcalver parses
+is independent of `log.showSignature`, `i18n.logOutputEncoding`, and
+`i18n.commitEncoding`, and gitcalver never verifies signatures.
 
 ### SHA-256
 
