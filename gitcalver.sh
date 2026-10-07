@@ -172,11 +172,14 @@ esac
 # produce the incomplete-history result instead of implicitly contacting a
 # promisor remote. Replacement refs are also excluded so every invocation sees
 # the repository's actual object graph. Git must also use the repository's
-# shallow and graft files and honor core.commitGraph=false.
+# shallow and graft files and honor core.commitGraph=false. A caller's pathspec
+# settings would make the :/ pathspec that lists gitlinks match nothing or fail.
 GIT_NO_LAZY_FETCH=1
 GIT_NO_REPLACE_OBJECTS=1
 export GIT_NO_LAZY_FETCH GIT_NO_REPLACE_OBJECTS
-unset GIT_SHALLOW_FILE GIT_GRAFT_FILE GIT_TEST_COMMIT_GRAPH
+unset GIT_SHALLOW_FILE GIT_GRAFT_FILE GIT_TEST_COMMIT_GRAPH \
+    GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS \
+    GIT_ICASE_PATHSPECS
 
 # Commit objects and paths can hold bytes that are invalid in the caller's
 # locale, and some awks abort on such bytes in a multibyte locale.

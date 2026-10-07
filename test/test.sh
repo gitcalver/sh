@@ -305,11 +305,17 @@ commit_at "2026-04-10T09:03:00Z" "add upper"
 DEEP_INDEX="$PWD/.git/index"
 assert_output "clean: submodule check ignores the superproject's GIT_INDEX_FILE" \
     "20260410.1" env GIT_INDEX_FILE="$DEEP_INDEX" "$GITCALVER"
+assert_output "clean: deep submodules with glob and noglob pathspecs" \
+    "20260410.1" env GIT_GLOB_PATHSPECS=1 GIT_NOGLOB_PATHSPECS=1 "$GITCALVER"
 git -C upper/lower/leaf config user.email "test@test.com"
 git -C upper/lower/leaf config user.name "Test"
 (cd upper/lower/leaf && commit_at "2026-04-10T09:04:00Z" "move leaf")
 assert_exit "dirty: moved submodule three levels down despite ignore=all" 2 \
     "$GITCALVER"
+assert_exit "dirty: moved deep submodule with GIT_LITERAL_PATHSPECS=1" 2 \
+    env GIT_LITERAL_PATHSPECS=1 "$GITCALVER"
+assert_exit "dirty: moved deep submodule with glob and noglob pathspecs" 2 \
+    env GIT_GLOB_PATHSPECS=1 GIT_NOGLOB_PATHSPECS=1 "$GITCALVER"
 
 # A repository added with plain `git add` is a gitlink that .gitmodules does
 # not map; git status still proves whether it changed.
@@ -331,6 +337,33 @@ git clone --quiet "$TMPDIR_BASE/unmapped_gitlink" \
     "$TMPDIR_BASE/unmapped_gitlink_clone"
 cd "$TMPDIR_BASE/unmapped_gitlink_clone"
 assert_output "clean: unpopulated gitlink without a .gitmodules entry" \
+    "20260410.1" "$GITCALVER"
+
+# git status lists a repository in the work tree that the index does not track
+# as one untracked directory, whatever it holds. It never lists an entry named
+# .git, so a directory holding only a .git that names no repository is empty.
+new_repo "untracked_nested_repository"
+printf '*.log\n/ignored/\n' >.gitignore
+git add .gitignore
+commit_at "2026-04-10T09:00:00Z"
+git init --quiet nested
+assert_exit "dirty: untracked nested repository with no files" 2 "$GITCALVER"
+echo "log" >nested/build.log
+assert_exit "dirty: untracked nested repository holding only ignored files" 2 \
+    "$GITCALVER"
+rm -rf nested
+git init --quiet outer/nested
+assert_exit "dirty: nested repository in an untracked directory" 2 \
+    "$GITCALVER"
+rm -rf outer
+git init --quiet ignored
+assert_output "clean: nested repository matched by an ignore rule" \
+    "20260410.1" "$GITCALVER"
+rm -rf ignored
+mkdir -p not_a_repository/.git
+mkdir not_a_gitfile
+echo "gitdir: missing" >not_a_gitfile/.git
+assert_output "clean: directories whose .git entry is not a repository" \
     "20260410.1" "$GITCALVER"
 
 new_repo "dirty_untracked_hidden_by_config"
@@ -371,6 +404,26 @@ GIT_COMMITTER_DATE="2026-04-10T09:01:00Z" git commit -m "add gitignore" \
 echo "this is ignored" >ignored.txt
 assert_output "clean: gitignored file" "20260410.2" \
     "$GITCALVER"
+
+# Git reads no .gitignore in the work tree that is a symbolic link, at any
+# depth, but follows one in place of .git/info/exclude.
+new_repo "symlinked_gitignore"
+echo "/matched.txt" >ignore-rules
+ln -s ignore-rules .gitignore
+mkdir sub
+ln -s ../ignore-rules sub/.gitignore
+git add ignore-rules .gitignore sub/.gitignore 2>/dev/null
+commit_at "2026-04-10T09:00:00Z"
+echo "new" >sub/matched.txt
+assert_exit "dirty: file matched only by a symlinked .gitignore below the top" \
+    2 "$GITCALVER"
+rm sub/matched.txt
+echo "new" >matched.txt
+assert_exit "dirty: file matched only by a symlinked .gitignore" 2 \
+    "$GITCALVER"
+ln -sf ../../ignore-rules .git/info/exclude
+assert_output "clean: file matched by a symlinked .git/info/exclude" \
+    "20260410.1" "$GITCALVER"
 
 new_repo "clean_index_unchanged"
 echo "tracked" >tracked.txt
