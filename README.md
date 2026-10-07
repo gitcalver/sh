@@ -131,7 +131,9 @@ before retrying.
 
 Missing trees and blobs do not affect calculation. Replacement refs are
 ignored, and repositories with a legacy `info/grafts` file are rejected because
-those mechanisms rewrite commit ancestry.
+those mechanisms rewrite commit ancestry. The git output gitcalver parses is
+independent of `log.showSignature`, `i18n.logOutputEncoding`, and
+`i18n.commitEncoding`, and gitcalver never verifies signatures.
 
 ### SHA-256
 

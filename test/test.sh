@@ -333,6 +333,35 @@ cd "$TMPDIR_BASE/unmapped_gitlink_clone"
 assert_output "clean: unpopulated gitlink without a .gitmodules entry" \
     "20260410.1" "$GITCALVER"
 
+new_repo "dirty_untracked_hidden_by_config"
+commit_at "2026-04-10T09:00:00Z"
+git config status.showUntrackedFiles no
+echo "new" >untracked.txt
+assert_output "showUntrackedFiles fixture: git status hides the file" "" \
+    git status --porcelain
+assert_exit "dirty: untracked file with status.showUntrackedFiles=no" 2 \
+    "$GITCALVER"
+assert_match "dirty -dirty: untracked file with status.showUntrackedFiles=no" \
+    "^20260410\.1-dirty\.[0-9a-f]{7}$" \
+    "$GITCALVER" --dirty "-dirty"
+
+# The status of a submodule reads its own and global configuration.
+new_repo "dirty_submodule_untracked_hidden_by_config"
+SUBMODULE_SOURCE="$TMPDIR_BASE/dirty_submodule_untracked_source"
+git init -b main --quiet "$SUBMODULE_SOURCE"
+git -C "$SUBMODULE_SOURCE" config user.email "test@test.com"
+git -C "$SUBMODULE_SOURCE" config user.name "Test"
+git -C "$SUBMODULE_SOURCE" commit --allow-empty -m "submodule" --quiet
+git -c protocol.file.allow=always submodule add --quiet \
+    "$SUBMODULE_SOURCE" sm
+commit_at "2026-04-10T09:00:00Z"
+git -C sm config status.showUntrackedFiles no
+echo "new" >sm/untracked.txt
+assert_output "showUntrackedFiles fixture: git status hides the submodule file" \
+    "" git status --porcelain
+assert_exit "dirty: submodule untracked file with status.showUntrackedFiles=no" \
+    2 "$GITCALVER"
+
 new_repo "clean_gitignored"
 commit_at "2026-04-10T09:00:00Z"
 echo "ignored.txt" >.gitignore
@@ -1969,6 +1998,19 @@ assert_output "object-ID-named directory is not a pathspec (forward)" \
 assert_output "object-ID-named directory is not a pathspec (reverse)" \
     "$OID_NAMED_DIR" "$GITCALVER" 20260410.1
 
+# A file named like a full object ID makes that ID ambiguous to any git command
+# that also accepts paths.
+new_repo "rev_named_like_file"
+commit_at "2026-04-10T09:00:00Z" "first"
+NAMED_FIRST=$(git rev-parse HEAD)
+: >"$NAMED_FIRST"
+git add "$NAMED_FIRST"
+commit_at "2026-04-10T12:00:00Z" "second"
+assert_output "revision: object ID that is also a file name" "20260410.1" \
+    "$GITCALVER" "$NAMED_FIRST"
+assert_output "reverse: object ID that is also a file name" "$NAMED_FIRST" \
+    "$GITCALVER" 20260410.1
+
 # ---- Time zone handling ----
 
 new_repo "tz_negative_offset"
@@ -2203,6 +2245,104 @@ echo "new" >untracked.txt
 assert_output "dirty hash is exactly seven characters" \
     "20260410.1-dirty.${SHORT_HASH}" \
     "$GITCALVER" --dirty "-dirty"
+
+# ---- Configuration that changes git log output ----
+
+# With log.showSignature=true, git log runs gpg.program on every signed commit
+# and prints the result to stdout ahead of that commit's formatted output. This
+# stand-in signs and verifies without a keyring and records each verification.
+FAKE_GPG="$TMPDIR_BASE/fake-gpg"
+FAKE_GPG_LOG="$TMPDIR_BASE/fake-gpg.log"
+cat >"$FAKE_GPG" <<EOF
+#!/bin/sh
+cat >/dev/null
+case " \$* " in
+*" --verify "*)
+    echo verify >>"$FAKE_GPG_LOG"
+    echo '[GNUPG:] GOODSIG 0123456789ABCDEF Test <test@test.com>'
+    echo 'gpg: Good signature from "Test <test@test.com>"' >&2
+    ;;
+*)
+    printf '%s\n' '-----BEGIN PGP SIGNATURE-----' '' 'ZmFrZQ==' \\
+        '-----END PGP SIGNATURE-----'
+    printf '%s\n' '[GNUPG:] KEY_CONSIDERED 0123456789ABCDEF 0' \\
+        '[GNUPG:] SIG_CREATED D 1 8 00 1775815200 0123456789ABCDEF' >&2
+    ;;
+esac
+EOF
+chmod +x "$FAKE_GPG"
+
+gpg_verifications() {
+    awk 'END { print NR }' "$FAKE_GPG_LOG"
+}
+
+new_repo "signed_history"
+git config gpg.program "$FAKE_GPG"
+git config gpg.format openpgp
+git config commit.gpgsign true
+commit_at "2026-04-10T09:00:00Z" "first"
+SIGNED_FIRST=$(git rev-parse HEAD)
+commit_at "2026-04-10T12:00:00Z" "second"
+SIGNED_SECOND=$(git rev-parse HEAD)
+commit_at "2026-04-11T09:00:00Z" "third"
+SIGNED_THIRD=$(git rev-parse HEAD)
+git config log.showSignature true
+# The cases below mean nothing unless this fixture's signatures really are
+# verified and printed by an unflagged git log.
+assert_match "showSignature fixture: git log prints verification text" \
+    "Good signature" \
+    git log -1 --format=%H
+assert_output "showSignature: forward" "20260411.1" \
+    "$GITCALVER"
+assert_output "showSignature: forward explicit revision" "20260410.2" \
+    "$GITCALVER" "$SIGNED_SECOND"
+assert_output "showSignature: reverse first of day" "$SIGNED_FIRST" \
+    "$GITCALVER" 20260410.1
+assert_output "showSignature: reverse last of day" "$SIGNED_SECOND" \
+    "$GITCALVER" 20260410.2
+assert_output "showSignature: reverse next day" "$SIGNED_THIRD" \
+    "$GITCALVER" 20260411.1
+: >"$FAKE_GPG_LOG"
+"$GITCALVER" >/dev/null 2>&1 || true
+assert_output "showSignature: forward verifies no signatures" 0 \
+    gpg_verifications
+: >"$FAKE_GPG_LOG"
+"$GITCALVER" 20260410.2 >/dev/null 2>&1 || true
+assert_output "showSignature: reverse verifies no signatures" 0 \
+    gpg_verifications
+
+# UTF-16 output starts with a byte-order mark and interleaves NUL bytes, so it
+# corrupts any parse of git log output that does not pin the encoding.
+new_repo "log_output_encoding"
+commit_at "2026-04-10T09:00:00Z" "first"
+ENCODING_FIRST=$(git rev-parse HEAD)
+commit_at "2026-04-10T12:00:00Z" "second"
+ENCODING_SECOND=$(git rev-parse HEAD)
+commit_at "2026-04-11T09:00:00Z" "third"
+ENCODING_THIRD=$(git rev-parse HEAD)
+git config i18n.logOutputEncoding UTF-16
+CONFIGURED_LOG_BYTES=$(git log -1 --format=%H | wc -c)
+UTF8_LOG_BYTES=$(git log -1 --encoding=UTF-8 --format=%H | wc -c)
+if [ "$CONFIGURED_LOG_BYTES" -gt "$UTF8_LOG_BYTES" ]; then
+    pass "logOutputEncoding fixture: git log re-encodes its output"
+else
+    fail "logOutputEncoding fixture: git log re-encodes its output" \
+        "more than $UTF8_LOG_BYTES bytes" "$CONFIGURED_LOG_BYTES bytes"
+fi
+assert_output "logOutputEncoding UTF-16: forward" "20260411.1" \
+    "$GITCALVER"
+assert_output "logOutputEncoding UTF-16: forward explicit revision" \
+    "20260410.2" \
+    "$GITCALVER" "$ENCODING_SECOND"
+assert_output "logOutputEncoding UTF-16: reverse first of day" \
+    "$ENCODING_FIRST" \
+    "$GITCALVER" 20260410.1
+assert_output "logOutputEncoding UTF-16: reverse last of day" \
+    "$ENCODING_SECOND" \
+    "$GITCALVER" 20260410.2
+assert_output "logOutputEncoding UTF-16: reverse next day" \
+    "$ENCODING_THIRD" \
+    "$GITCALVER" 20260411.1
 
 # ---- Prefix validation ----
 

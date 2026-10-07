@@ -438,10 +438,12 @@ boundary_oids() {
 # a malformed commit's date (one with no author line, say) as 0 or a partial
 # number. A commit whose date the result depends on, the target or one the
 # walk skipped, must read the same through %ct, from its committer line.
+# --encoding=none keeps i18n.logOutputEncoding from re-encoding the listing.
 check_dates() (
     [ -n "$1" ] || exit 0
     listing=$(printf '%s\n' "$1" |
-        rev_list --no-walk --stdin --timestamp --format='date %ct') ||
+        rev_list --no-walk --stdin --timestamp --encoding=none \
+            --format='date %ct') ||
         die_unprovable
     bad=$(printf '%s\n' "$listing" | awk '
         $2 == "commit" && oid == "" {

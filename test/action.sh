@@ -295,5 +295,76 @@ rm "$REPO/.git/objects/${middle:0:2}/${middle:2}"
 assert_failure 'missing object cannot prove tag continuity' \
     'local history cannot prove continuity' publish 20260410.1 20260410
 
+# With log.showSignature=true, git show runs gpg.program on each signed commit
+# and prints the result to stdout ahead of the formatted output. This stand-in
+# signs and verifies without a keyring.
+FAKE_GPG="$TMPDIR_BASE/fake-gpg"
+cat >"$FAKE_GPG" <<'EOF'
+#!/bin/sh
+cat >/dev/null
+case " $* " in
+*" --verify "*)
+    echo '[GNUPG:] GOODSIG 0123456789ABCDEF Test <test@test.com>'
+    echo 'gpg: Good signature from "Test <test@test.com>"' >&2
+    ;;
+*)
+    printf '%s\n' '-----BEGIN PGP SIGNATURE-----' '' 'ZmFrZQ==' \
+        '-----END PGP SIGNATURE-----'
+    printf '%s\n' '[GNUPG:] KEY_CONSIDERED 0123456789ABCDEF 0' \
+        '[GNUPG:] SIG_CREATED D 1 8 00 1775815200 0123456789ABCDEF' >&2
+    ;;
+esac
+EOF
+chmod +x "$FAKE_GPG"
+
+new_repo signature_display
+git -C "$REPO" config gpg.program "$FAKE_GPG"
+git -C "$REPO" config gpg.format openpgp
+git -C "$REPO" config commit.gpgsign true
+commit_at 2026-04-09 first
+push_tag 20260409.1 HEAD
+commit_at 2026-04-10 second
+push_branch
+git -C "$REPO" config log.showSignature true
+# The fixture is inert unless an unflagged git show prints the verification.
+if [[ $(git -C "$REPO" show -s --format=%cd HEAD) == *'Good signature'* ]]; then
+    pass 'showSignature fixture: git show prints verification text'
+else
+    fail_test 'showSignature fixture: git show prints verification text' \
+        'no verification text in git show output'
+fi
+assert_success 'publish ignores log.showSignature' \
+    publish 20260410.1 20260410
+
+# UTF-16 output starts with a byte-order mark and interleaves NUL bytes.
+new_repo log_output_encoding
+commit_at 2026-04-09 first
+push_tag 20260409.1 HEAD
+commit_at 2026-04-10 second
+push_branch
+git -C "$REPO" config i18n.logOutputEncoding UTF-16
+configured_bytes=$(git -C "$REPO" show -s --format=%cd HEAD | wc -c)
+utf8_bytes=$(git -C "$REPO" show -s --encoding=UTF-8 --format=%cd HEAD | wc -c)
+if ((configured_bytes > utf8_bytes)); then
+    pass 'logOutputEncoding fixture: git show re-encodes its output'
+else
+    fail_test 'logOutputEncoding fixture: git show re-encodes its output' \
+        "expected more than $utf8_bytes bytes, got $configured_bytes"
+fi
+assert_success 'publish ignores i18n.logOutputEncoding' \
+    publish 20260410.1 20260410
+
+# A file named like a full object ID makes that ID ambiguous to git show.
+new_repo object_id_file_name
+commit_at 2026-04-09 first
+first=$(git -C "$REPO" rev-parse HEAD)
+push_tag 20260409.1 HEAD
+: >"$REPO/$first"
+git -C "$REPO" add -- "$first"
+commit_at 2026-04-10 second
+push_branch
+assert_success 'publish with a file named like the previous tag target' \
+    publish 20260410.1 20260410
+
 printf '%s passed, %s failed\n' "$passed" "$failed"
 ((failed == 0))
