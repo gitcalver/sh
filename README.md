@@ -22,7 +22,15 @@ See the [GitCalVer specification](https://gitcalver.org) for full details.
 
 ## Installation
 
-The only dependency is git (v2.15.0+).
+The only dependency is git (v2.15.0+). Some workspace and partial-clone results
+follow the installed git:
+
+- Before 2.32, git reads a `.gitignore` that is a symbolic link.
+- Before 2.25, git does not count an untracked nested repository with no
+  untracked files as a change.
+- Before 2.19, git honours replace refs inside submodules.
+- Without the 2024 security fixes, git ignores `GIT_NO_LAZY_FETCH`, so a
+  partial clone may fetch missing objects from its promisor remote.
 
 Copy `gitcalver.sh` into your project or somewhere on your `PATH`:
 

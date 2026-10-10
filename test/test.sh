@@ -14,6 +14,7 @@ GITCALVER="${GITCALVER:-$(cd "$(dirname "$0")/.." && pwd)/gitcalver.sh}"
 
 PASS=0
 FAIL=0
+SKIP=0
 TOTAL=0
 
 # Portable color output
@@ -37,6 +38,22 @@ fail() {
     FAIL=$((FAIL + 1))
     TOTAL=$((TOTAL + 1))
     printf "${RED}FAIL${RESET} %s: expected %s, got %s\n" "$1" "$2" "$3"
+}
+
+skip() {
+    SKIP=$((SKIP + 1))
+    TOTAL=$((TOTAL + 1))
+    printf "SKIP %s: %s\n" "$1" "$2"
+}
+
+GIT_VERSION=$(git version |
+    sed -n 's/^git version \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
+
+# Succeeds when the git on PATH is at least version $1.$2.
+git_at_least() {
+    [ "${GIT_VERSION%.*}" -gt "$1" ] || {
+        [ "${GIT_VERSION%.*}" -eq "$1" ] && [ "${GIT_VERSION#*.}" -ge "$2" ]
+    }
 }
 
 assert_output() {
@@ -415,12 +432,22 @@ ln -s ../ignore-rules sub/.gitignore
 git add ignore-rules .gitignore sub/.gitignore 2>/dev/null
 commit_at "2026-04-10T09:00:00Z"
 echo "new" >sub/matched.txt
-assert_exit "dirty: file matched only by a symlinked .gitignore below the top" \
-    2 "$GITCALVER"
+if git_at_least 2 32; then
+    assert_exit "dirty: file matched only by a symlinked .gitignore below the top" \
+        2 "$GITCALVER"
+else
+    skip "dirty: file matched only by a symlinked .gitignore below the top" \
+        "git $GIT_VERSION reads a symlinked .gitignore"
+fi
 rm sub/matched.txt
 echo "new" >matched.txt
-assert_exit "dirty: file matched only by a symlinked .gitignore" 2 \
-    "$GITCALVER"
+if git_at_least 2 32; then
+    assert_exit "dirty: file matched only by a symlinked .gitignore" 2 \
+        "$GITCALVER"
+else
+    skip "dirty: file matched only by a symlinked .gitignore" \
+        "git $GIT_VERSION reads a symlinked .gitignore"
+fi
 ln -sf ../../ignore-rules .git/info/exclude
 assert_output "clean: file matched by a symlinked .git/info/exclude" \
     "20260410.1" "$GITCALVER"
@@ -789,11 +816,26 @@ else
     fail "partial fixture attempts lazy fetch without safeguard" \
         "remote helper invoked" "no remote-helper invocation"
 fi
+# Git versions without the 2024 security fixes ignore GIT_NO_LAZY_FETCH, so
+# nothing in gitcalver can keep them from fetching.
+set +e
+env PATH="$BLOCKED_BIN:$PATH" GIT_NO_LAZY_FETCH=1 \
+    git cat-file -e "$PARTIAL_PARENT^{commit}" >/dev/null 2>&1
+set -e
+if [ -e "$BLOCKED_MARKER" ]; then
+    LAZY_FETCH_GUARD=false
+    rm "$BLOCKED_MARKER"
+else
+    LAZY_FETCH_GUARD=true
+fi
 assert_exit "missing promised commit returns incomplete history" 4 \
     env PATH="$BLOCKED_BIN:$PATH" "$GITCALVER" --branch main HEAD
 assert_exit "missing promised commit blocks reverse proof" 4 \
     env PATH="$BLOCKED_BIN:$PATH" "$GITCALVER" --branch main 20260411.1
-if [ -e "$BLOCKED_MARKER" ]; then
+if [ "$LAZY_FETCH_GUARD" = false ]; then
+    skip "core calculation performs no lazy fetch" \
+        "git $GIT_VERSION ignores GIT_NO_LAZY_FETCH"
+elif [ -e "$BLOCKED_MARKER" ]; then
     fail "core calculation performs no lazy fetch" \
         "no remote-helper invocation" "remote helper invoked"
 else
@@ -1832,9 +1874,7 @@ assert_output "detect origin/main (no origin/HEAD)" "20260410.1" \
     "$GITCALVER"
 
 new_repo "detect_local_master"
-# Rename the current (still unborn) branch; naming the old "main" ref would
-# fail on older git since it does not exist until the first commit.
-git branch -m master
+git symbolic-ref HEAD refs/heads/master
 commit_at "2026-04-10T09:00:00Z"
 # No remote and no "main"; falls back to local "master".
 assert_output "detect local master branch" "20260410.1" \
@@ -1844,7 +1884,7 @@ new_repo "detect_origin_head_slash"
 # A default branch name may itself contain slashes (e.g. "release/v1").
 # origin/HEAD must be stripped of only the "refs/remotes/origin/" prefix, not
 # reduced to its last path segment ("v1"), which would fail to resolve.
-git branch -m release/v1
+git symbolic-ref HEAD refs/heads/release/v1
 commit_at "2026-04-10T09:00:00Z"
 git clone --bare . "$TMPDIR_BASE/detect_origin_head_slash_remote" --quiet
 git remote add origin "$TMPDIR_BASE/detect_origin_head_slash_remote"
@@ -2442,7 +2482,7 @@ assert_exit "multiple args after -- rejected" 1 \
 # ---- Summary ----
 
 echo ""
-echo "=== Results: $PASS passed, $FAIL failed, $TOTAL total ==="
+echo "=== Results: $PASS passed, $FAIL failed, $SKIP skipped, $TOTAL total ==="
 
 if [ "$FAIL" -gt 0 ]; then
     exit 1
