@@ -2,7 +2,11 @@
 # SPDX-License-Identifier: MIT
 
 name: Test
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - "**"
+  pull_request: null
 
 jobs:
   test-script:
@@ -18,16 +22,22 @@ jobs:
           - macos-14
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
       - run: make test-local
         env:
           GIT_DEFAULT_HASH: ${{ matrix.object-format }}
+    name: test-script
 
   test-docker:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
       - run: make test-docker
+    name: test-docker
 
   test-action:
     runs-on: ubuntu-24.04
@@ -36,14 +46,15 @@ jobs:
       # branch such as gitcalver-test/x, which would break `checkout -B`.
       TEST_BRANCH: gitcalver-test-${{ github.run_id }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       # gitcalver versions only a branch's first-parent chain, and PR-merge and
       # tag checkouts are on no branch, so put one at HEAD and pass it as
       # `branch:` to every step.
       - run: git checkout -B "$TEST_BRANCH"
-      - uses: ./
+      - uses: ./ # zizmor: ignore[self-repository] Exercises the checked-out action and workspace state.
         id: version
         with:
           branch: ${{ env.TEST_BRANCH }}
@@ -67,17 +78,17 @@ jobs:
           [[ "$DIRTY" == "false" ]]
           echo "$HASH" | grep -qE '^[0-9a-f]{7}$'
           [[ "$TAG" == "$VERSION" ]]
-      - uses: ./
+      - uses: ./ # zizmor: ignore[self-repository] Exercises the checked-out action and workspace state.
         id: semver
         with:
-          prefix: '0.'
-          tag-prefix: 'release/v'
+          prefix: "0."
+          tag-prefix: "release/v"
           remote: origin
           branch: ${{ env.TEST_BRANCH }}
-      - uses: ./
+      - uses: ./ # zizmor: ignore[self-repository] Exercises the checked-out action and workspace state.
         id: go
         with:
-          prefix: 'v0.'
+          prefix: "v0."
           branch: ${{ env.TEST_BRANCH }}
       - env:
           SEMVER_VERSION: ${{ steps.semver.outputs.version }}
@@ -88,10 +99,10 @@ jobs:
           [[ "$SEMVER_TAG" == "release/v$SEMVER_VERSION" ]]
           echo "$GO_VERSION" | grep -qE '^v0\.[0-9]{8}\.[0-9]+$'
       - run: echo dirty > untracked.txt
-      - uses: ./
+      - uses: ./ # zizmor: ignore[self-repository] Exercises the checked-out action and workspace state.
         id: dirty
         with:
-          dirty: '-dirty'
+          dirty: "-dirty"
           branch: ${{ env.TEST_BRANCH }}
       - env:
           DIRTY: ${{ steps.dirty.outputs.dirty }}
@@ -99,24 +110,30 @@ jobs:
         run: |
           [[ "$DIRTY" == "true" ]]
           echo "$VERSION" | grep -qE '^[0-9]{8}\.[0-9]+-dirty\.[0-9a-f]+$'
-      - uses: ./
+      - uses: ./ # zizmor: ignore[self-repository] Exercises the checked-out action and workspace state.
         id: nohash
         with:
-          dirty: '-dirty'
-          dirty-hash: 'false'
+          dirty: "-dirty"
+          dirty-hash: "false"
           branch: ${{ env.TEST_BRANCH }}
       - env:
           VERSION: ${{ steps.nohash.outputs.version }}
         run: |
           echo "$VERSION" | grep -qE '^[0-9]{8}\.[0-9]+-dirty$'
-      - uses: ./
+      - uses: ./ # zizmor: ignore[self-repository] Exercises the checked-out action and workspace state.
         id: dirty-tag
         continue-on-error: true
         with:
-          dirty: '-dirty'
+          dirty: "-dirty"
           branch: ${{ env.TEST_BRANCH }}
-          tag: 'true'
+          tag: "true"
       - env:
           OUTCOME: ${{ steps.dirty-tag.outcome }}
         run: |
           [[ "$OUTCOME" == "failure" ]]
+    name: test-action
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}

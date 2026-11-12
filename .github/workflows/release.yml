@@ -1,31 +1,34 @@
 name: Release
 on:
   workflow_run:
+    # zizmor: ignore[dangerous-triggers] Only successful pushes from this repository can publish releases.
     workflows: [Test]
     types: [completed]
     branches: [main]
 
-concurrency: release
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions: {}
 
 jobs:
   release:
     if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push'
+      github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-24.04
     permissions:
-      contents: write
+      contents: write # Creates release tags for the tested commit.
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@v7.0.1 # zizmor: ignore[artipacked] Release tags use the checkout credential.
         with:
           fetch-depth: 0
           ref: ${{ github.event.workflow_run.head_sha }}
-      - uses: ./
+          persist-credentials: true
+      - uses: ./ # zizmor: ignore[self-repository] Runs the action from the tested checkout.
         id: version
         with:
-          tag-prefix: 'v'
+          tag-prefix: "v"
       - name: Build stamped release asset
         env:
           ARTIFACT: ${{ runner.temp }}/gitcalver.sh
@@ -39,11 +42,11 @@ jobs:
             echo "Stamp verification failed: $actual" >&2
             exit 1
           }
-      - uses: ./
+      - uses: ./ # zizmor: ignore[self-repository] Runs the action from the tested checkout.
         id: publish
         with:
-          tag-prefix: 'v'
-          tag: 'true'
+          tag-prefix: "v"
+          tag: "true"
       - name: Publish immutable release
         env:
           ARTIFACT: ${{ runner.temp }}/gitcalver.sh
@@ -105,3 +108,4 @@ jobs:
             --draft=false \
             --latest
           verify_published
+    name: release
