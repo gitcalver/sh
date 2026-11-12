@@ -19,7 +19,7 @@ jobs:
           - ubuntu-24.04
           - ubuntu-22.04
           - macos-26
-          - macos-14
+          - macos-15
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.1
@@ -28,7 +28,7 @@ jobs:
       - run: make test-local
         env:
           GIT_DEFAULT_HASH: ${{ matrix.object-format }}
-    name: test-script
+    name: test-script (${{ matrix.object-format }}, ${{ matrix.os }})
 
   test-docker:
     runs-on: ubuntu-24.04
